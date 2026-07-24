@@ -44,6 +44,11 @@ function createClient() {
       clientId: "meridian-staff",
       dataPath: sessionPath,
     }),
+    webVersionCache: {
+      type: "remote",
+      remotePath: "https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/{version}.html",
+      strict: false,
+    },
     puppeteer: {
       headless: true,
       defaultViewport: {
@@ -183,11 +188,6 @@ async function initializeInternal() {
     whatsappStatus = STATUS.READY;
     currentQrDataUrl = "";
     logger.info("WhatsApp client ready");
-    try {
-      await cacheGroupIdWithRetry();
-    } catch (error) {
-      logger.error({ error: error.message, stack: error.stack }, "Unable to cache WhatsApp group");
-    }
   });
 
   client.on("disconnected", (reason) => {
