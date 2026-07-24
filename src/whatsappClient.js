@@ -18,6 +18,12 @@ let cachedGroupId = "";
 let initializing = false;
 let initializePromise = null;
 
+function wait(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
 function allowedGroupName() {
   return (process.env.ALLOWED_GROUP_NAME || "Meridian Staff").trim();
 }
@@ -50,7 +56,6 @@ function createClient() {
         "--disable-dev-shm-usage",
         "--disable-gpu",
         "--no-zygote",
-        "--single-process",
         "--disable-extensions",
         "--disable-background-networking",
         "--disable-background-timer-throttling",
@@ -90,11 +95,40 @@ async function cacheGroupId() {
   return cachedGroupId;
 }
 
+async function cacheGroupIdWithRetry({ attempts = 4, delayMs = 3000 } = {}) {
+  let lastError;
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      const groupId = await cacheGroupId();
+      if (groupId) {
+        return groupId;
+      }
+    } catch (error) {
+      lastError = error;
+      logger.warn(
+        { attempt, attempts, error: error.message, stack: error.stack },
+        "WhatsApp group cache attempt failed"
+      );
+    }
+
+    if (attempt < attempts) {
+      await wait(delayMs);
+    }
+  }
+
+  if (lastError) {
+    throw lastError;
+  }
+
+  return "";
+}
+
 async function findGroupId({ forceRefresh = false } = {}) {
   if (cachedGroupId && !forceRefresh) {
     return cachedGroupId;
   }
-  return cacheGroupId();
+  return cacheGroupIdWithRetry();
 }
 
 async function initializeWhatsApp() {
@@ -150,7 +184,7 @@ async function initializeInternal() {
     currentQrDataUrl = "";
     logger.info("WhatsApp client ready");
     try {
-      await cacheGroupId();
+      await cacheGroupIdWithRetry();
     } catch (error) {
       logger.error({ error: error.message, stack: error.stack }, "Unable to cache WhatsApp group");
     }
