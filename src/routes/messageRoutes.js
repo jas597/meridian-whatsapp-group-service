@@ -91,9 +91,10 @@ function createMessageRouter({ whatsappClient }) {
       return res.status(200).json(body);
     } catch (error) {
       const statusCode = error.statusCode || 500;
+      const errorMessage = error && error.message ? error.message : "Unable to send WhatsApp message.";
       const body = {
         success: false,
-        error: statusCode === 500 ? "Unable to send WhatsApp message." : error.message,
+        error: errorMessage,
       };
       if (idempotencyKey) {
         idempotencyCache.set(idempotencyKey, {
