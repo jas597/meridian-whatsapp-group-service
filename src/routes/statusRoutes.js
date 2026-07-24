@@ -52,6 +52,33 @@ function createStatusRouter({ whatsappClient }) {
 </html>`);
   });
 
+  router.get("/groups", async (req, res) => {
+    const expectedKey = process.env.QR_PAGE_SECRET;
+    const key = String(req.query.key || "");
+
+    if (!expectedKey || key !== expectedKey) {
+      return res.status(401).json({
+        success: false,
+        error: "Unauthorized.",
+      });
+    }
+
+    try {
+      const groups = await whatsappClient.listGroups();
+      return res.json({
+        success: true,
+        whatsappStatus: whatsappClient.getStatus(),
+        groups,
+      });
+    } catch (error) {
+      return res.status(error.statusCode || 500).json({
+        success: false,
+        whatsappStatus: whatsappClient.getStatus(),
+        error: error.message,
+      });
+    }
+  });
+
   return router;
 }
 

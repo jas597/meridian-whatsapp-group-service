@@ -29,6 +29,14 @@ function allowedGroupName() {
   return (process.env.ALLOWED_GROUP_NAME || "Meridian Staff").trim();
 }
 
+function configuredGroupId() {
+  const rawGroupId = (process.env.WHATSAPP_GROUP_ID || "").trim();
+  if (!rawGroupId) {
+    return "";
+  }
+  return rawGroupId.endsWith("@g.us") ? rawGroupId : `${rawGroupId}@g.us`;
+}
+
 function getStatus() {
   return whatsappStatus;
 }
@@ -87,6 +95,14 @@ async function cacheGroupId() {
     return "";
   }
 
+  const configuredId = configuredGroupId();
+  if (configuredId) {
+    cachedGroupId = configuredId;
+    cachedGroupName = allowedGroupName();
+    logger.info({ group: cachedGroupName, groupId: cachedGroupId }, "Using configured WhatsApp group ID");
+    return cachedGroupId;
+  }
+
   const groupName = allowedGroupName();
   const chats = await client.getChats();
   const normalizedGroupName = groupName.toLowerCase();
@@ -109,6 +125,44 @@ async function cacheGroupId() {
   }
 
   return cachedGroupId;
+}
+
+async function listGroups() {
+  if (!client || whatsappStatus !== STATUS.READY) {
+    const error = new Error("WhatsApp is not ready.");
+    error.statusCode = 503;
+    throw error;
+  }
+
+  if (!client.pupPage) {
+    const error = new Error("WhatsApp browser page is not available.");
+    error.statusCode = 503;
+    throw error;
+  }
+
+  return client.pupPage.evaluate(() => {
+    const store = window.Store || {};
+    const chatCollection = store.Chat;
+    const rawChats = chatCollection && typeof chatCollection.getModelsArray === "function"
+      ? chatCollection.getModelsArray()
+      : [];
+
+    return rawChats
+      .filter((chat) => {
+        const id = chat && chat.id;
+        const serialized = id && (id._serialized || `${id.user || ""}@${id.server || ""}`);
+        return serialized && serialized.endsWith("@g.us");
+      })
+      .map((chat) => {
+        const id = chat.id || {};
+        return {
+          id: id._serialized || `${id.user || ""}@${id.server || ""}`,
+          name: chat.name || chat.formattedTitle || chat.contact?.name || "",
+        };
+      })
+      .filter((chat) => chat.id)
+      .sort((a, b) => String(a.name).localeCompare(String(b.name)));
+  });
 }
 
 async function cacheGroupIdWithRetry({ attempts = 4, delayMs = 3000 } = {}) {
@@ -141,6 +195,11 @@ async function cacheGroupIdWithRetry({ attempts = 4, delayMs = 3000 } = {}) {
 }
 
 async function findGroupId({ forceRefresh = false } = {}) {
+  const configuredId = configuredGroupId();
+  if (configuredId) {
+    return configuredId;
+  }
+
   if (cachedGroupId && cachedGroupName === allowedGroupName() && !forceRefresh) {
     return cachedGroupId;
   }
@@ -287,6 +346,7 @@ module.exports = {
   initializeWhatsApp,
   getStatus,
   getQrDataUrl,
+  listGroups,
   sendGroupMessage,
   _STATUS: STATUS,
 };
