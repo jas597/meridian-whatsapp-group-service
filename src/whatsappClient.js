@@ -16,6 +16,7 @@ let whatsappStatus = STATUS.STARTING;
 let currentQrDataUrl = "";
 let cachedGroupId = "";
 let initializing = false;
+let initializePromise = null;
 
 function allowedGroupName() {
   return (process.env.ALLOWED_GROUP_NAME || "Meridian Staff").trim();
@@ -76,19 +77,40 @@ async function findGroupId({ forceRefresh = false } = {}) {
   return cacheGroupId();
 }
 
-async function initialize() {
+async function initializeWhatsApp() {
+  if (whatsappStatus === STATUS.READY) {
+    logger.info("WhatsApp client already ready; skipping initialization");
+    return client;
+  }
+
+  if (initializePromise) {
+    logger.info("WhatsApp client initialization already in progress");
+    return initializePromise;
+  }
+
+  initializePromise = initializeInternal();
+  try {
+    return await initializePromise;
+  } finally {
+    initializePromise = null;
+  }
+}
+
+async function initializeInternal() {
   if (client || initializing) {
-    return;
+    logger.info({ status: whatsappStatus }, "WhatsApp client already created; skipping duplicate initialization");
+    return client;
   }
 
   initializing = true;
   whatsappStatus = STATUS.STARTING;
+  logger.info("WhatsApp client initialization started");
   client = createClient();
 
   client.on("qr", async (qr) => {
     whatsappStatus = STATUS.QR_REQUIRED;
     currentQrDataUrl = await qrcode.toDataURL(qr);
-    logger.info("WhatsApp QR code generated");
+    logger.info("WhatsApp QR received");
   });
 
   client.on("authenticated", () => {
@@ -100,7 +122,7 @@ async function initialize() {
   client.on("auth_failure", (message) => {
     whatsappStatus = STATUS.QR_REQUIRED;
     cachedGroupId = "";
-    logger.error({ message }, "WhatsApp authentication failure");
+    logger.error({ message }, "WhatsApp auth_failure");
   });
 
   client.on("ready", async () => {
@@ -110,7 +132,7 @@ async function initialize() {
     try {
       await cacheGroupId();
     } catch (error) {
-      logger.error({ error: error.message }, "Unable to cache WhatsApp group");
+      logger.error({ error: error.message, stack: error.stack }, "Unable to cache WhatsApp group");
     }
   });
 
@@ -125,7 +147,20 @@ async function initialize() {
   });
 
   try {
+    logger.info("Calling whatsapp-web.js client.initialize()");
     await client.initialize();
+    logger.info({ status: whatsappStatus }, "whatsapp-web.js client.initialize() returned");
+    return client;
+  } catch (error) {
+    logger.error(
+      { error: error.message, stack: error.stack },
+      "WhatsApp initialization error"
+    );
+    whatsappStatus = STATUS.DISCONNECTED;
+    client = undefined;
+    cachedGroupId = "";
+    currentQrDataUrl = "";
+    throw error;
   } finally {
     initializing = false;
   }
@@ -176,7 +211,8 @@ async function sendGroupMessage({ group, message }) {
 }
 
 module.exports = {
-  initialize,
+  initialize: initializeWhatsApp,
+  initializeWhatsApp,
   getStatus,
   getQrDataUrl,
   sendGroupMessage,

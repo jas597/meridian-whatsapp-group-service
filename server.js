@@ -9,6 +9,22 @@ const { createMessageRouter } = require("./src/routes/messageRoutes");
 const { createStatusRouter } = require("./src/routes/statusRoutes");
 const { errorHandler, notFoundHandler } = require("./src/middleware/errorHandler");
 
+process.on("unhandledRejection", (reason) => {
+  const error = reason instanceof Error ? reason : new Error(String(reason));
+  logger.error(
+    { error: error.message, stack: error.stack },
+    "Unhandled promise rejection"
+  );
+});
+
+process.on("uncaughtException", (error) => {
+  logger.fatal(
+    { error: error.message, stack: error.stack },
+    "Uncaught exception"
+  );
+  process.exit(1);
+});
+
 function createApp(options = {}) {
   const app = express();
   const client = options.whatsappClient || whatsappClient;
@@ -29,12 +45,18 @@ async function start() {
   const port = Number(process.env.PORT || 3000);
   const app = createApp();
 
-  whatsappClient.initialize().catch((error) => {
-    logger.error({ error: error.message }, "WhatsApp client initialization failed");
-  });
-
-  app.listen(port, () => {
+  app.listen(port, "0.0.0.0", async () => {
     logger.info({ port }, "meridian-whatsapp-group-service started");
+
+    try {
+      logger.info("Initializing WhatsApp client");
+      await whatsappClient.initializeWhatsApp();
+    } catch (error) {
+      logger.error(
+        { error: error.message, stack: error.stack },
+        "WhatsApp initialization failed"
+      );
+    }
   });
 }
 
