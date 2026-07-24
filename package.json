@@ -1,0 +1,26 @@
+{
+  "name": "meridian-whatsapp-group-service",
+  "version": "1.0.0",
+  "description": "Meridian WhatsApp group messaging service for staff schedule broadcasts.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test",
+    "check": "node --check server.js && node --check src/whatsappClient.js && node --check src/routes/messageRoutes.js && node --check src/routes/statusRoutes.js && node --check src/middleware/auth.js && node --check src/middleware/errorHandler.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "express": "^4.19.2",
+    "express-rate-limit": "^7.4.1",
+    "helmet": "^7.1.0",
+    "pino": "^9.5.0",
+    "qrcode": "^1.5.4",
+    "whatsapp-web.js": "^1.26.0"
+  },
+  "devDependencies": {
+    "supertest": "^7.0.0"
+  }
+}

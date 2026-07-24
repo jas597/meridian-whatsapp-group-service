@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: meridian-whatsapp-group-service
+    env: docker
+    plan: starter
+    numInstances: 1
+    healthCheckPath: /health
+    disk:
+      name: whatsapp-session
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: PORT
+        value: 3000
+      - key: ALLOWED_GROUP_NAME
+        value: Meridian Staff
+      - key: WHATSAPP_SESSION_PATH
+        value: /var/data/whatsapp-session
+      - key: NODE_ENV
+        value: production
+      - key: WHATSAPP_WEBHOOK_SECRET
+        sync: false
+      - key: QR_PAGE_SECRET
+        sync: false
