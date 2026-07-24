@@ -15,6 +15,7 @@ let client;
 let whatsappStatus = STATUS.STARTING;
 let currentQrDataUrl = "";
 let cachedGroupId = "";
+let cachedGroupName = "";
 let initializing = false;
 let initializePromise = null;
 
@@ -88,13 +89,23 @@ async function cacheGroupId() {
 
   const groupName = allowedGroupName();
   const chats = await client.getChats();
-  const group = chats.find((chat) => chat.isGroup === true && chat.name === groupName);
+  const normalizedGroupName = groupName.toLowerCase();
+  const group = chats.find((chat) => (
+    chat.isGroup === true
+    && typeof chat.name === "string"
+    && chat.name.trim().toLowerCase() === normalizedGroupName
+  ));
   cachedGroupId = group ? group.id._serialized : "";
+  cachedGroupName = cachedGroupId ? groupName : "";
 
   if (cachedGroupId) {
-    logger.info({ group: groupName }, "WhatsApp group cached");
+    logger.info({ group: groupName, groupId: cachedGroupId }, "WhatsApp group cached");
   } else {
-    logger.warn({ group: groupName }, "WhatsApp group not found");
+    const groupNames = chats
+      .filter((chat) => chat.isGroup === true && typeof chat.name === "string")
+      .map((chat) => chat.name)
+      .slice(0, 20);
+    logger.warn({ group: groupName, groupCount: groupNames.length, groupNames }, "WhatsApp group not found");
   }
 
   return cachedGroupId;
@@ -130,7 +141,7 @@ async function cacheGroupIdWithRetry({ attempts = 4, delayMs = 3000 } = {}) {
 }
 
 async function findGroupId({ forceRefresh = false } = {}) {
-  if (cachedGroupId && !forceRefresh) {
+  if (cachedGroupId && cachedGroupName === allowedGroupName() && !forceRefresh) {
     return cachedGroupId;
   }
   return cacheGroupIdWithRetry();
@@ -181,6 +192,7 @@ async function initializeInternal() {
   client.on("auth_failure", (message) => {
     whatsappStatus = STATUS.QR_REQUIRED;
     cachedGroupId = "";
+    cachedGroupName = "";
     logger.error({ message }, "WhatsApp auth_failure");
   });
 
@@ -193,6 +205,7 @@ async function initializeInternal() {
   client.on("disconnected", (reason) => {
     whatsappStatus = STATUS.DISCONNECTED;
     cachedGroupId = "";
+    cachedGroupName = "";
     logger.warn({ reason }, "WhatsApp disconnected");
   });
 
@@ -213,6 +226,7 @@ async function initializeInternal() {
     whatsappStatus = STATUS.DISCONNECTED;
     client = undefined;
     cachedGroupId = "";
+    cachedGroupName = "";
     currentQrDataUrl = "";
     throw error;
   } finally {
@@ -243,12 +257,14 @@ async function sendGroupMessage({ group, message }) {
 
   try {
     const sentMessage = await client.sendMessage(groupId, message);
+    const messageId = sentMessage && sentMessage.id ? sentMessage.id._serialized : "";
+    logger.info({ group, groupId, messageId }, "WhatsApp group message sent");
     return {
-      messageId: sentMessage && sentMessage.id ? sentMessage.id._serialized : "",
+      messageId,
       sentAt: new Date().toISOString(),
     };
   } catch (firstError) {
-    logger.warn({ error: firstError.message, group }, "Send failed; refreshing group cache");
+    logger.warn({ error: firstError.message, stack: firstError.stack, group }, "Send failed; refreshing group cache");
     groupId = await findGroupId({ forceRefresh: true });
     if (!groupId) {
       const error = new Error("WhatsApp group not found.");
@@ -257,8 +273,10 @@ async function sendGroupMessage({ group, message }) {
     }
 
     const sentMessage = await client.sendMessage(groupId, message);
+    const messageId = sentMessage && sentMessage.id ? sentMessage.id._serialized : "";
+    logger.info({ group, groupId, messageId }, "WhatsApp group message sent after cache refresh");
     return {
-      messageId: sentMessage && sentMessage.id ? sentMessage.id._serialized : "",
+      messageId,
       sentAt: new Date().toISOString(),
     };
   }

@@ -59,7 +59,11 @@ function createMessageRouter({ whatsappClient }) {
     const idempotencyKey = String(req.get("x-idempotency-key") || "").trim();
     if (idempotencyKey && idempotencyCache.has(idempotencyKey)) {
       const cached = idempotencyCache.get(idempotencyKey);
-      return res.status(cached.statusCode).json(cached.body);
+      logger.info({ group: validation.group, idempotencyKey }, "Returning cached WhatsApp send response");
+      return res.status(cached.statusCode).json({
+        ...cached.body,
+        cached: true,
+      });
     }
 
     const preview = validation.message.slice(0, 160);
@@ -75,6 +79,7 @@ function createMessageRouter({ whatsappClient }) {
         group: validation.group,
         messageId: result.messageId,
         sentAt: result.sentAt,
+        cached: false,
       };
       if (idempotencyKey) {
         idempotencyCache.set(idempotencyKey, {
@@ -98,7 +103,7 @@ function createMessageRouter({ whatsappClient }) {
         });
       }
       if (statusCode >= 500) {
-        logger.error({ error: error.message, group: validation.group }, "WhatsApp send failed");
+        logger.error({ error: error.message, stack: error.stack, group: validation.group }, "WhatsApp send failed");
       } else {
         logger.warn({ error: error.message, group: validation.group }, "WhatsApp send rejected");
       }
