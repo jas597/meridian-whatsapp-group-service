@@ -134,35 +134,14 @@ async function listGroups() {
     throw error;
   }
 
-  if (!client.pupPage) {
-    const error = new Error("WhatsApp browser page is not available.");
-    error.statusCode = 503;
-    throw error;
-  }
-
-  return client.pupPage.evaluate(() => {
-    const store = window.Store || {};
-    const chatCollection = store.Chat;
-    const rawChats = chatCollection && typeof chatCollection.getModelsArray === "function"
-      ? chatCollection.getModelsArray()
-      : [];
-
-    return rawChats
-      .filter((chat) => {
-        const id = chat && chat.id;
-        const serialized = id && (id._serialized || `${id.user || ""}@${id.server || ""}`);
-        return serialized && serialized.endsWith("@g.us");
-      })
-      .map((chat) => {
-        const id = chat.id || {};
-        return {
-          id: id._serialized || `${id.user || ""}@${id.server || ""}`,
-          name: chat.name || chat.formattedTitle || chat.contact?.name || "",
-        };
-      })
-      .filter((chat) => chat.id)
-      .sort((a, b) => String(a.name).localeCompare(String(b.name)));
-  });
+  const chats = await client.getChats();
+  return chats
+    .filter((chat) => chat.isGroup === true && chat.id && chat.id._serialized)
+    .map((chat) => ({
+      id: chat.id._serialized,
+      name: chat.name || "",
+    }))
+    .sort((a, b) => String(a.name).localeCompare(String(b.name)));
 }
 
 async function cacheGroupIdWithRetry({ attempts = 4, delayMs = 3000 } = {}) {
