@@ -104,7 +104,7 @@ async function cacheGroupId() {
   }
 
   const groupName = allowedGroupName();
-  const chats = await client.getChats();
+  const chats = await listGroupChats();
   const normalizedGroupName = groupName.toLowerCase();
   const group = chats.find((chat) => (
     chat.isGroup === true
@@ -127,6 +127,60 @@ async function cacheGroupId() {
   return cachedGroupId;
 }
 
+async function listGroupChats() {
+  try {
+    const chats = await client.getChats();
+    const groups = chats
+      .filter((chat) => chat.isGroup === true && chat.id && chat.id._serialized)
+      .map((chat) => ({
+        id: {
+          _serialized: chat.id._serialized,
+        },
+        isGroup: true,
+        name: chat.name || "",
+      }));
+
+    if (groups.length > 0) {
+      return groups;
+    }
+  } catch (error) {
+    logger.warn(
+      { error: error.message, stack: error.stack },
+      "client.getChats() group listing failed"
+    );
+  }
+
+  if (!client.pupPage) {
+    return [];
+  }
+
+  return client.pupPage.evaluate(() => {
+    const store = window.Store || {};
+    const chatCollection = store.Chat;
+    const rawChats = chatCollection && typeof chatCollection.getModelsArray === "function"
+      ? chatCollection.getModelsArray()
+      : [];
+
+    return rawChats
+      .filter((chat) => {
+        const id = chat && chat.id;
+        const serialized = id && (id._serialized || `${id.user || ""}@${id.server || ""}`);
+        return serialized && serialized.endsWith("@g.us");
+      })
+      .map((chat) => {
+        const id = chat.id || {};
+        return {
+          id: {
+            _serialized: id._serialized || `${id.user || ""}@${id.server || ""}`,
+          },
+          isGroup: true,
+          name: chat.name || chat.formattedTitle || chat.contact?.name || "",
+        };
+      })
+      .filter((chat) => chat.id && chat.id._serialized);
+  });
+}
+
 async function listGroups() {
   if (!client || whatsappStatus !== STATUS.READY) {
     const error = new Error("WhatsApp is not ready.");
@@ -134,9 +188,8 @@ async function listGroups() {
     throw error;
   }
 
-  const chats = await client.getChats();
+  const chats = await listGroupChats();
   return chats
-    .filter((chat) => chat.isGroup === true && chat.id && chat.id._serialized)
     .map((chat) => ({
       id: chat.id._serialized,
       name: chat.name || "",
