@@ -1,4 +1,6 @@
 const qrcode = require("qrcode");
+const fs = require("fs");
+const path = require("path");
 const { Client, LocalAuth } = require("whatsapp-web.js");
 
 const logger = require("./utils/logger");
@@ -23,6 +25,49 @@ function wait(ms) {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+}
+
+function inboundMessagesFile() {
+  return process.env.WHATSAPP_INBOUND_MESSAGES_FILE || "/var/data/whatsapp-inbound-messages.jsonl";
+}
+
+function normalizeMessageContact(value) {
+  return String(value || "").replace(/@c\.us$|@g\.us$/i, "").replace(/[^\d]/g, "");
+}
+
+function appendInboundMessage(record) {
+  const filePath = inboundMessagesFile();
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.appendFileSync(filePath, `${JSON.stringify(record)}\n`, "utf8");
+}
+
+function listInboundMessages({ since = "", contact = "", limit = 200 } = {}) {
+  const filePath = inboundMessagesFile();
+  if (!fs.existsSync(filePath)) {
+    return [];
+  }
+
+  const sinceTime = since ? Date.parse(since) : 0;
+  const normalizedContact = normalizeMessageContact(contact);
+  const rows = fs.readFileSync(filePath, "utf8")
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map((line) => {
+      try {
+        return JSON.parse(line);
+      } catch (error) {
+        return null;
+      }
+    })
+    .filter(Boolean)
+    .filter((row) => {
+      const rowTime = Date.parse(row.receivedAt || "");
+      const rowContact = normalizeMessageContact(row.contact || row.from || "");
+      return (!sinceTime || rowTime >= sinceTime)
+        && (!normalizedContact || rowContact === normalizedContact);
+    });
+
+  return rows.slice(Math.max(rows.length - Number(limit || 200), 0));
 }
 
 function allowedGroupName() {
@@ -319,6 +364,37 @@ async function initializeInternal() {
     logger.info("WhatsApp client ready");
   });
 
+  client.on("message", async (message) => {
+    try {
+      if (!message || message.fromMe) {
+        return;
+      }
+      const from = String(message.from || "");
+      const author = String(message.author || "");
+      const body = String(message.body || "").trim();
+      if (!body) {
+        return;
+      }
+      const contact = normalizeMessageContact(author || from);
+      const record = {
+        id: message.id && message.id._serialized ? message.id._serialized : "",
+        from,
+        author,
+        contact,
+        body,
+        type: message.type || "",
+        receivedAt: new Date(Number(message.timestamp || 0) * 1000 || Date.now()).toISOString(),
+      };
+      appendInboundMessage(record);
+      logger.info({ contact, preview: body.slice(0, 120) }, "WhatsApp inbound message saved");
+    } catch (error) {
+      logger.warn(
+        { error: error.message, stack: error.stack },
+        "Unable to save WhatsApp inbound message"
+      );
+    }
+  });
+
   client.on("disconnected", (reason) => {
     whatsappStatus = STATUS.DISCONNECTED;
     cachedGroupId = "";
@@ -458,6 +534,7 @@ module.exports = {
   getStatus,
   getQrDataUrl,
   listGroups,
+  listInboundMessages,
   sendGroupMessage,
   sendContactMessage,
   _STATUS: STATUS,

@@ -217,6 +217,33 @@ function createMessageRouter({ whatsappClient }) {
     }
   });
 
+  router.get("/inbound-messages", requireBearerSecret, (req, res) => {
+    const since = typeof req.query.since === "string" ? req.query.since : "";
+    const contact = typeof req.query.contact === "string" ? req.query.contact : "";
+    const limit = Number(req.query.limit || 200);
+
+    try {
+      const messages = whatsappClient.listInboundMessages({
+        since,
+        contact,
+        limit: Number.isFinite(limit) ? limit : 200,
+      });
+      return res.json({
+        success: true,
+        messages,
+      });
+    } catch (error) {
+      logger.error(
+        { error: error.message, stack: error.stack },
+        "Unable to list WhatsApp inbound messages"
+      );
+      return res.status(500).json({
+        success: false,
+        error: "Unable to list WhatsApp inbound messages.",
+      });
+    }
+  });
+
   return router;
 }
 
