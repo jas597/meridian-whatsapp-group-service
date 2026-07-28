@@ -45,6 +45,28 @@ function getQrDataUrl() {
   return currentQrDataUrl;
 }
 
+async function destroyExistingClient(reason) {
+  if (!client) {
+    return;
+  }
+
+  const existingClient = client;
+  client = undefined;
+  cachedGroupId = "";
+  cachedGroupName = "";
+  currentQrDataUrl = "";
+
+  try {
+    await existingClient.destroy();
+    logger.info({ reason }, "Destroyed existing WhatsApp client");
+  } catch (error) {
+    logger.warn(
+      { reason, error: error.message, stack: error.stack },
+      "Unable to destroy existing WhatsApp client"
+    );
+  }
+}
+
 function createClient() {
   const sessionPath = process.env.WHATSAPP_SESSION_PATH || "/var/data/whatsapp-session";
 
@@ -244,6 +266,10 @@ async function initializeWhatsApp() {
     return client;
   }
 
+  if (whatsappStatus === STATUS.DISCONNECTED && client) {
+    await destroyExistingClient("reinitialize after disconnected status");
+  }
+
   if (initializePromise) {
     logger.info("WhatsApp client initialization already in progress");
     return initializePromise;
@@ -297,6 +323,9 @@ async function initializeInternal() {
     whatsappStatus = STATUS.DISCONNECTED;
     cachedGroupId = "";
     cachedGroupName = "";
+    currentQrDataUrl = "";
+    initializing = false;
+    client = undefined;
     logger.warn({ reason }, "WhatsApp disconnected");
   });
 

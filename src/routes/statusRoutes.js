@@ -12,12 +12,21 @@ function createStatusRouter({ whatsappClient }) {
     });
   });
 
-  router.get("/qr", (req, res) => {
+  router.get("/qr", async (req, res) => {
     const expectedKey = process.env.QR_PAGE_SECRET;
     const key = String(req.query.key || "");
 
     if (!expectedKey || key !== expectedKey) {
       return res.status(401).send("Unauthorized.");
+    }
+
+    const currentStatus = whatsappClient.getStatus();
+    if (currentStatus === "disconnected" || currentStatus === "starting") {
+      try {
+        await whatsappClient.initializeWhatsApp();
+      } catch (error) {
+        // The page below still renders the current status; initialization errors are logged by the client.
+      }
     }
 
     const qrDataUrl = whatsappClient.getQrDataUrl();
