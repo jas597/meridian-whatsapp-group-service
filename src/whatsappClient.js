@@ -498,7 +498,7 @@ function normalizeContactTarget(contact) {
   if (!value) {
     return "";
   }
-  if (value.endsWith("@c.us") || value.endsWith("@g.us")) {
+  if (value.endsWith("@c.us") || value.endsWith("@g.us") || value.endsWith("@lid")) {
     return value;
   }
   const digits = value.replace(/[^\d]/g, "");
@@ -513,11 +513,17 @@ async function resolveContactId(contact) {
   if (!normalized) {
     return "";
   }
-  if (normalized.endsWith("@c.us") || normalized.endsWith("@g.us")) {
+  if (normalized.endsWith("@c.us") || normalized.endsWith("@g.us") || normalized.endsWith("@lid")) {
     return normalized;
   }
+  const phoneChatId = `${normalized}@c.us`;
   const numberId = await client.getNumberId(normalized);
-  return numberId && numberId._serialized ? numberId._serialized : "";
+  const resolvedId = numberId && numberId._serialized ? numberId._serialized : "";
+  if (!resolvedId || resolvedId.endsWith("@lid")) {
+    logger.info({ contact, phoneChatId, resolvedId }, "Using phone chat id for WhatsApp contact");
+    return phoneChatId;
+  }
+  return resolvedId;
 }
 
 async function sendContactMessage({ contact, message, imageBase64, imageFilename }) {
