@@ -18,6 +18,8 @@ function cleanIdempotencyCache(now = Date.now()) {
 function validatePayload(body) {
   const group = typeof body.group === "string" ? body.group.trim() : "";
   const message = typeof body.message === "string" ? body.message.trim() : "";
+  const imageBase64 = typeof body.imageBase64 === "string" ? body.imageBase64.trim() : "";
+  const imageFilename = typeof body.imageFilename === "string" ? body.imageFilename.trim() : "staff-schedule.png";
   const allowedGroupName = (process.env.ALLOWED_GROUP_NAME || "Meridian Staff").trim();
 
   if (!group || !message) {
@@ -32,7 +34,7 @@ function validatePayload(body) {
     return { error: "Unauthorized group name." };
   }
 
-  return { group, message };
+  return { group, message, imageBase64, imageFilename };
 }
 
 function allowedContacts() {
@@ -49,9 +51,11 @@ function normalizeContactForComparison(contact) {
 function validateContactPayload(body) {
   const contact = typeof body.contact === "string" ? body.contact.trim() : "";
   const message = typeof body.message === "string" ? body.message.trim() : "";
+  const imageBase64 = typeof body.imageBase64 === "string" ? body.imageBase64.trim() : "";
+  const imageFilename = typeof body.imageFilename === "string" ? body.imageFilename.trim() : "staff-schedule.png";
 
-  if (!contact || !message) {
-    return { error: "contact and message are required." };
+  if (!contact || (!message && !imageBase64)) {
+    return { error: "contact and message or imageBase64 are required." };
   }
 
   if (message.length > 10000) {
@@ -70,7 +74,7 @@ function validateContactPayload(body) {
     }
   }
 
-  return { contact, message };
+  return { contact, message, imageBase64, imageFilename };
 }
 
 function createMessageRouter({ whatsappClient }) {
@@ -111,6 +115,8 @@ function createMessageRouter({ whatsappClient }) {
       const result = await whatsappClient.sendGroupMessage({
         group: validation.group,
         message: validation.message,
+        imageBase64: validation.imageBase64,
+        imageFilename: validation.imageFilename,
       });
       const body = {
         success: true,
@@ -178,6 +184,8 @@ function createMessageRouter({ whatsappClient }) {
       const result = await whatsappClient.sendContactMessage({
         contact: validation.contact,
         message: validation.message,
+        imageBase64: validation.imageBase64,
+        imageFilename: validation.imageFilename,
       });
       const body = {
         success: true,

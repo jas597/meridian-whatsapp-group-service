@@ -31,7 +31,7 @@ function createApp(options = {}) {
 
   app.disable("x-powered-by");
   app.use(helmet());
-  app.use(express.json({ limit: "64kb" }));
+  app.use(express.json({ limit: "8mb" }));
 
   app.use("/", createStatusRouter({ whatsappClient: client }));
   app.use("/", createMessageRouter({ whatsappClient: client }));

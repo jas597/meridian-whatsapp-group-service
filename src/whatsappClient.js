@@ -1,7 +1,7 @@
 const qrcode = require("qrcode");
 const fs = require("fs");
 const path = require("path");
-const { Client, LocalAuth } = require("whatsapp-web.js");
+const { Client, LocalAuth, MessageMedia } = require("whatsapp-web.js");
 
 const logger = require("./utils/logger");
 
@@ -430,7 +430,16 @@ async function initializeInternal() {
   }
 }
 
-async function sendGroupMessage({ group, message }) {
+function buildImageMedia(imageBase64, imageFilename = "staff-schedule.png") {
+  const data = String(imageBase64 || "").trim();
+  if (!data) {
+    return null;
+  }
+  const cleanData = data.includes(",") ? data.split(",").pop() : data;
+  return new MessageMedia("image/png", cleanData, imageFilename || "staff-schedule.png");
+}
+
+async function sendGroupMessage({ group, message, imageBase64, imageFilename }) {
   if (whatsappStatus !== STATUS.READY) {
     const error = new Error("WhatsApp is not ready.");
     error.statusCode = 503;
@@ -452,7 +461,10 @@ async function sendGroupMessage({ group, message }) {
   }
 
   try {
-    const sentMessage = await client.sendMessage(groupId, message);
+    const media = buildImageMedia(imageBase64, imageFilename);
+    const sentMessage = media
+      ? await client.sendMessage(groupId, media, { caption: message })
+      : await client.sendMessage(groupId, message);
     const messageId = sentMessage && sentMessage.id ? sentMessage.id._serialized : "";
     logger.info({ group, groupId, messageId }, "WhatsApp group message sent");
     return {
@@ -468,7 +480,10 @@ async function sendGroupMessage({ group, message }) {
       throw error;
     }
 
-    const sentMessage = await client.sendMessage(groupId, message);
+    const media = buildImageMedia(imageBase64, imageFilename);
+    const sentMessage = media
+      ? await client.sendMessage(groupId, media, { caption: message })
+      : await client.sendMessage(groupId, message);
     const messageId = sentMessage && sentMessage.id ? sentMessage.id._serialized : "";
     logger.info({ group, groupId, messageId }, "WhatsApp group message sent after cache refresh");
     return {
@@ -505,7 +520,7 @@ async function resolveContactId(contact) {
   return numberId && numberId._serialized ? numberId._serialized : "";
 }
 
-async function sendContactMessage({ contact, message }) {
+async function sendContactMessage({ contact, message, imageBase64, imageFilename }) {
   if (whatsappStatus !== STATUS.READY) {
     const error = new Error("WhatsApp is not ready.");
     error.statusCode = 503;
@@ -519,7 +534,10 @@ async function sendContactMessage({ contact, message }) {
     throw error;
   }
 
-  const sentMessage = await client.sendMessage(contactId, message);
+  const media = buildImageMedia(imageBase64, imageFilename);
+  const sentMessage = media
+    ? await client.sendMessage(contactId, media, { caption: message })
+    : await client.sendMessage(contactId, message);
   const messageId = sentMessage && sentMessage.id ? sentMessage.id._serialized : "";
   logger.info({ contact, contactId, messageId }, "WhatsApp contact message sent");
   return {
