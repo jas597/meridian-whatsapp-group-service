@@ -5,9 +5,18 @@ const request = require("supertest");
 const { createApp } = require("../server");
 const { idempotencyCache } = require("../src/routes/messageRoutes");
 
-function buildApp(clientOverrides = {}) {
+function buildApp(clientOverrides = {}, envOverrides = {}) {
   process.env.WHATSAPP_WEBHOOK_SECRET = "test-secret";
   process.env.ALLOWED_GROUP_NAME = "Meridian Staff";
+  if (Object.hasOwn(envOverrides, "ALLOWED_CONTACTS")) {
+    if (envOverrides.ALLOWED_CONTACTS) {
+      process.env.ALLOWED_CONTACTS = envOverrides.ALLOWED_CONTACTS;
+    } else {
+      delete process.env.ALLOWED_CONTACTS;
+    }
+  } else {
+    delete process.env.ALLOWED_CONTACTS;
+  }
   idempotencyCache.clear();
 
   const whatsappClient = {
@@ -15,6 +24,10 @@ function buildApp(clientOverrides = {}) {
     getQrDataUrl: () => "",
     sendGroupMessage: async () => ({
       messageId: "test-message-id",
+      sentAt: "2026-07-24T12:00:00.000Z",
+    }),
+    sendContactMessage: async () => ({
+      messageId: "test-contact-message-id",
       sentAt: "2026-07-24T12:00:00.000Z",
     }),
     ...clientOverrides,
@@ -156,4 +169,51 @@ test("duplicate idempotency key returns cached result", async () => {
   assert.equal(first.body.messageId, "message-1");
   assert.equal(second.body.messageId, "message-1");
   assert.equal(sendCount, 1);
+});
+
+test("sends contact message successfully", async () => {
+  const app = buildApp();
+  const response = await request(app)
+    .post("/send-contact-message")
+    .set("Authorization", "Bearer test-secret")
+    .send({ contact: "+16475550123", message: "Hello" });
+
+  assert.equal(response.status, 200);
+  assert.equal(response.body.success, true);
+  assert.equal(response.body.messageId, "test-contact-message-id");
+});
+
+test("rejects missing contact", async () => {
+  const app = buildApp();
+  const response = await request(app)
+    .post("/send-contact-message")
+    .set("Authorization", "Bearer test-secret")
+    .send({ message: "Hello" });
+
+  assert.equal(response.status, 400);
+});
+
+test("rejects unauthorized contact when allow list is configured", async () => {
+  const app = buildApp({}, {
+    ALLOWED_CONTACTS: "+16475550123;+16475550124",
+  });
+  const response = await request(app)
+    .post("/send-contact-message")
+    .set("Authorization", "Bearer test-secret")
+    .send({ contact: "+16475550199", message: "Hello" });
+
+  assert.equal(response.status, 400);
+  assert.equal(response.body.error, "Unauthorized contact.");
+});
+
+test("allows configured contact with punctuation differences", async () => {
+  const app = buildApp({}, {
+    ALLOWED_CONTACTS: "+1 (647) 555-0123",
+  });
+  const response = await request(app)
+    .post("/send-contact-message")
+    .set("Authorization", "Bearer test-secret")
+    .send({ contact: "+16475550123", message: "Hello" });
+
+  assert.equal(response.status, 200);
 });

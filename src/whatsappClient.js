@@ -373,6 +373,56 @@ async function sendGroupMessage({ group, message }) {
   }
 }
 
+function normalizeContactTarget(contact) {
+  const value = String(contact || "").trim();
+  if (!value) {
+    return "";
+  }
+  if (value.endsWith("@c.us") || value.endsWith("@g.us")) {
+    return value;
+  }
+  const digits = value.replace(/[^\d]/g, "");
+  if (!digits) {
+    return "";
+  }
+  return digits;
+}
+
+async function resolveContactId(contact) {
+  const normalized = normalizeContactTarget(contact);
+  if (!normalized) {
+    return "";
+  }
+  if (normalized.endsWith("@c.us") || normalized.endsWith("@g.us")) {
+    return normalized;
+  }
+  const numberId = await client.getNumberId(normalized);
+  return numberId && numberId._serialized ? numberId._serialized : "";
+}
+
+async function sendContactMessage({ contact, message }) {
+  if (whatsappStatus !== STATUS.READY) {
+    const error = new Error("WhatsApp is not ready.");
+    error.statusCode = 503;
+    throw error;
+  }
+
+  const contactId = await resolveContactId(contact);
+  if (!contactId) {
+    const error = new Error("WhatsApp contact not found.");
+    error.statusCode = 404;
+    throw error;
+  }
+
+  const sentMessage = await client.sendMessage(contactId, message);
+  const messageId = sentMessage && sentMessage.id ? sentMessage.id._serialized : "";
+  logger.info({ contact, contactId, messageId }, "WhatsApp contact message sent");
+  return {
+    messageId,
+    sentAt: new Date().toISOString(),
+  };
+}
+
 module.exports = {
   initialize: initializeWhatsApp,
   initializeWhatsApp,
@@ -380,5 +430,6 @@ module.exports = {
   getQrDataUrl,
   listGroups,
   sendGroupMessage,
+  sendContactMessage,
   _STATUS: STATUS,
 };
