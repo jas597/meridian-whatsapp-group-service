@@ -517,8 +517,27 @@ async function resolveContactId(contact) {
     return normalized;
   }
   const phoneChatId = `${normalized}@c.us`;
-  const numberId = await client.getNumberId(normalized);
-  const resolvedId = numberId && numberId._serialized ? numberId._serialized : "";
+
+  if (!client || typeof client.getNumberId !== "function") {
+    logger.warn(
+      { contact, phoneChatId },
+      "WhatsApp getNumberId is unavailable; using phone chat id for contact"
+    );
+    return phoneChatId;
+  }
+
+  let resolvedId = "";
+  try {
+    const numberId = await client.getNumberId(normalized);
+    resolvedId = numberId && numberId._serialized ? numberId._serialized : "";
+  } catch (error) {
+    logger.warn(
+      { contact, phoneChatId, error: error.message, stack: error.stack },
+      "WhatsApp getNumberId failed; using phone chat id for contact"
+    );
+    return phoneChatId;
+  }
+
   if (!resolvedId || resolvedId.endsWith("@lid")) {
     logger.info({ contact, phoneChatId, resolvedId }, "Using phone chat id for WhatsApp contact");
     return phoneChatId;
