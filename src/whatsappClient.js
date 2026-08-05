@@ -549,6 +549,52 @@ async function resolveContactIds(contact) {
   return contactIds;
 }
 
+function messageSerializedId(message) {
+  return message && message.id && message.id._serialized ? message.id._serialized : "";
+}
+
+async function verifyRecentContactMessage({ contact, contactId, message, attemptStartedAtMs }) {
+  if (!client || typeof client.getChatById !== "function") {
+    return "";
+  }
+  const verifyDelayMs = Number(process.env.WHATSAPP_CONTACT_VERIFY_DELAY_MS || 2500);
+  if (verifyDelayMs > 0) {
+    await wait(Math.min(10000, verifyDelayMs));
+  }
+  try {
+    const chat = await client.getChatById(contactId);
+    if (!chat || typeof chat.fetchMessages !== "function") {
+      return "";
+    }
+    const recentMessages = await chat.fetchMessages({ limit: 12 });
+    const expectedBody = String(message || "").trim();
+    for (const recentMessage of recentMessages.slice().reverse()) {
+      if (!recentMessage || !recentMessage.fromMe) {
+        continue;
+      }
+      const timestampMs = Number(recentMessage.timestamp || 0) * 1000;
+      if (timestampMs && timestampMs < attemptStartedAtMs - 10000) {
+        continue;
+      }
+      const recentBody = String(recentMessage.body || recentMessage.caption || "").trim();
+      if (expectedBody && recentBody !== expectedBody) {
+        continue;
+      }
+      const messageId = messageSerializedId(recentMessage);
+      if (messageId) {
+        logger.info({ contact, contactId, messageId }, "Verified WhatsApp contact message in chat history");
+        return messageId;
+      }
+    }
+  } catch (error) {
+    logger.warn(
+      { contact, contactId, error: error.message, stack: error.stack },
+      "Unable to verify WhatsApp contact message in chat history"
+    );
+  }
+  return "";
+}
+
 async function sendContactMessage({ contact, message, imageBase64, imageFilename }) {
   if (whatsappStatus !== STATUS.READY) {
     const error = new Error("WhatsApp is not ready.");
@@ -566,11 +612,19 @@ async function sendContactMessage({ contact, message, imageBase64, imageFilename
   const media = buildImageMedia(imageBase64, imageFilename);
   const attempts = [];
   for (const contactId of contactIds) {
+    const attemptStartedAtMs = Date.now();
     const sentMessage = media
       ? await client.sendMessage(contactId, media, { caption: message })
       : await client.sendMessage(contactId, message);
-    const messageId = sentMessage && sentMessage.id ? sentMessage.id._serialized : "";
-    attempts.push({ contactId, messageId });
+    const directMessageId = messageSerializedId(sentMessage);
+    const verifiedMessageId = directMessageId || await verifyRecentContactMessage({
+      contact,
+      contactId,
+      message,
+      attemptStartedAtMs,
+    });
+    attempts.push({ contactId, directMessageId, verifiedMessageId });
+    const messageId = directMessageId || verifiedMessageId;
     if (messageId) {
       logger.info({ contact, contactId, messageId }, "WhatsApp contact message sent");
       return {
