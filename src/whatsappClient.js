@@ -90,6 +90,15 @@ function getQrDataUrl() {
   return currentQrDataUrl;
 }
 
+function requireReadyClient() {
+  if (!client || whatsappStatus !== STATUS.READY) {
+    const error = new Error("WhatsApp is not ready.");
+    error.statusCode = 503;
+    throw error;
+  }
+  return client;
+}
+
 async function destroyExistingClient(reason) {
   if (!client) {
     return;
@@ -307,8 +316,13 @@ async function findGroupId({ forceRefresh = false } = {}) {
 
 async function initializeWhatsApp() {
   if (whatsappStatus === STATUS.READY) {
-    logger.info("WhatsApp client already ready; skipping initialization");
-    return client;
+    if (!client) {
+      logger.warn("WhatsApp status was ready without a client; reinitializing");
+      whatsappStatus = STATUS.DISCONNECTED;
+    } else {
+      logger.info("WhatsApp client already ready; skipping initialization");
+      return client;
+    }
   }
 
   if (whatsappStatus === STATUS.DISCONNECTED && client) {
@@ -440,11 +454,7 @@ function buildImageMedia(imageBase64, imageFilename = "staff-schedule.png") {
 }
 
 async function sendGroupMessage({ group, message, imageBase64, imageFilename }) {
-  if (whatsappStatus !== STATUS.READY) {
-    const error = new Error("WhatsApp is not ready.");
-    error.statusCode = 503;
-    throw error;
-  }
+  const readyClient = requireReadyClient();
 
   const allowed = allowedGroupName();
   if (group !== allowed) {
@@ -463,8 +473,8 @@ async function sendGroupMessage({ group, message, imageBase64, imageFilename }) 
   try {
     const media = buildImageMedia(imageBase64, imageFilename);
     const sentMessage = media
-      ? await client.sendMessage(groupId, media, { caption: message })
-      : await client.sendMessage(groupId, message);
+      ? await readyClient.sendMessage(groupId, media, { caption: message })
+      : await readyClient.sendMessage(groupId, message);
     const messageId = sentMessage && sentMessage.id ? sentMessage.id._serialized : "";
     logger.info({ group, groupId, messageId }, "WhatsApp group message sent");
     return {
@@ -482,8 +492,8 @@ async function sendGroupMessage({ group, message, imageBase64, imageFilename }) 
 
     const media = buildImageMedia(imageBase64, imageFilename);
     const sentMessage = media
-      ? await client.sendMessage(groupId, media, { caption: message })
-      : await client.sendMessage(groupId, message);
+      ? await readyClient.sendMessage(groupId, media, { caption: message })
+      : await readyClient.sendMessage(groupId, message);
     const messageId = sentMessage && sentMessage.id ? sentMessage.id._serialized : "";
     logger.info({ group, groupId, messageId }, "WhatsApp group message sent after cache refresh");
     return {
@@ -596,11 +606,7 @@ async function verifyRecentContactMessage({ contact, contactId, message, attempt
 }
 
 async function sendContactMessage({ contact, message, imageBase64, imageFilename }) {
-  if (whatsappStatus !== STATUS.READY) {
-    const error = new Error("WhatsApp is not ready.");
-    error.statusCode = 503;
-    throw error;
-  }
+  const readyClient = requireReadyClient();
 
   const contactIds = await resolveContactIds(contact);
   if (!contactIds.length) {
@@ -614,8 +620,8 @@ async function sendContactMessage({ contact, message, imageBase64, imageFilename
   for (const contactId of contactIds) {
     const attemptStartedAtMs = Date.now();
     const sentMessage = media
-      ? await client.sendMessage(contactId, media, { caption: message })
-      : await client.sendMessage(contactId, message);
+      ? await readyClient.sendMessage(contactId, media, { caption: message })
+      : await readyClient.sendMessage(contactId, message);
     const directMessageId = messageSerializedId(sentMessage);
     const verifiedMessageId = directMessageId || await verifyRecentContactMessage({
       contact,
