@@ -183,6 +183,24 @@ test("sends contact message successfully", async () => {
   assert.equal(response.body.messageId, "test-contact-message-id");
 });
 
+test("rejects contact message when WhatsApp does not confirm send", async () => {
+  const app = buildApp({
+    sendContactMessage: async () => {
+      const error = new Error("WhatsApp did not confirm the contact message send.");
+      error.statusCode = 502;
+      throw error;
+    },
+  });
+  const response = await request(app)
+    .post("/send-contact-message")
+    .set("Authorization", "Bearer test-secret")
+    .send({ contact: "+16475550123", message: "Hello" });
+
+  assert.equal(response.status, 502);
+  assert.equal(response.body.success, false);
+  assert.equal(response.body.error, "WhatsApp did not confirm the contact message send.");
+});
+
 test("rejects missing contact", async () => {
   const app = buildApp();
   const response = await request(app)

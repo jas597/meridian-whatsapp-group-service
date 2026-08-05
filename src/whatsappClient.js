@@ -538,9 +538,12 @@ async function resolveContactId(contact) {
     return phoneChatId;
   }
 
-  if (!resolvedId || resolvedId.endsWith("@lid")) {
+  if (!resolvedId) {
     logger.info({ contact, phoneChatId, resolvedId }, "Using phone chat id for WhatsApp contact");
     return phoneChatId;
+  }
+  if (resolvedId.endsWith("@lid")) {
+    logger.info({ contact, phoneChatId, resolvedId }, "Using resolved LID for WhatsApp contact");
   }
   return resolvedId;
 }
@@ -564,6 +567,12 @@ async function sendContactMessage({ contact, message, imageBase64, imageFilename
     ? await client.sendMessage(contactId, media, { caption: message })
     : await client.sendMessage(contactId, message);
   const messageId = sentMessage && sentMessage.id ? sentMessage.id._serialized : "";
+  if (!messageId) {
+    const error = new Error("WhatsApp did not confirm the contact message send.");
+    error.statusCode = 502;
+    logger.error({ contact, contactId, sentMessage }, "WhatsApp contact send returned no message id");
+    throw error;
+  }
   logger.info({ contact, contactId, messageId }, "WhatsApp contact message sent");
   return {
     messageId,
