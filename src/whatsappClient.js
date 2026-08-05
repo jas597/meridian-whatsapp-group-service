@@ -518,7 +518,7 @@ function normalizeContactTarget(contact) {
   return digits;
 }
 
-async function resolveContactIds(contact) {
+function resolveContactIds(contact) {
   const normalized = normalizeContactTarget(contact);
   if (!normalized) {
     return [];
@@ -527,36 +527,8 @@ async function resolveContactIds(contact) {
     return [normalized];
   }
   const phoneChatId = `${normalized}@c.us`;
-
-  if (!client || typeof client.getNumberId !== "function") {
-    logger.warn(
-      { contact, phoneChatId },
-      "WhatsApp getNumberId is unavailable; using phone chat id for contact"
-    );
-    return [phoneChatId];
-  }
-
-  let resolvedId = "";
-  try {
-    const numberId = await client.getNumberId(normalized);
-    resolvedId = numberId && numberId._serialized ? numberId._serialized : "";
-  } catch (error) {
-    logger.warn(
-      { contact, phoneChatId, error: error.message, stack: error.stack },
-      "WhatsApp getNumberId failed; using phone chat id for contact"
-    );
-    return [phoneChatId];
-  }
-
-  if (!resolvedId) {
-    logger.info({ contact, phoneChatId, resolvedId }, "Using phone chat id for WhatsApp contact");
-    return [phoneChatId];
-  }
-  const contactIds = resolvedId === phoneChatId ? [phoneChatId] : [resolvedId, phoneChatId];
-  if (resolvedId.endsWith("@lid")) {
-    logger.info({ contact, phoneChatId, resolvedId }, "Trying resolved LID before phone chat id for WhatsApp contact");
-  }
-  return contactIds;
+  logger.info({ contact, phoneChatId }, "Using phone chat id for WhatsApp contact");
+  return [phoneChatId];
 }
 
 function messageSerializedId(message) {
@@ -608,7 +580,7 @@ async function verifyRecentContactMessage({ contact, contactId, message, attempt
 async function sendContactMessage({ contact, message, imageBase64, imageFilename }) {
   const readyClient = requireReadyClient();
 
-  const contactIds = await resolveContactIds(contact);
+  const contactIds = resolveContactIds(contact);
   if (!contactIds.length) {
     const error = new Error("WhatsApp contact not found.");
     error.statusCode = 404;
