@@ -190,6 +190,7 @@ function createMessageRouter({ whatsappClient }) {
       const body = {
         success: true,
         contact: validation.contact,
+        contactId: result.contactId,
         messageId: result.messageId,
         sentAt: result.sentAt,
         cached: false,

@@ -508,13 +508,13 @@ function normalizeContactTarget(contact) {
   return digits;
 }
 
-async function resolveContactId(contact) {
+async function resolveContactIds(contact) {
   const normalized = normalizeContactTarget(contact);
   if (!normalized) {
-    return "";
+    return [];
   }
   if (normalized.endsWith("@c.us") || normalized.endsWith("@g.us") || normalized.endsWith("@lid")) {
-    return normalized;
+    return [normalized];
   }
   const phoneChatId = `${normalized}@c.us`;
 
@@ -523,7 +523,7 @@ async function resolveContactId(contact) {
       { contact, phoneChatId },
       "WhatsApp getNumberId is unavailable; using phone chat id for contact"
     );
-    return phoneChatId;
+    return [phoneChatId];
   }
 
   let resolvedId = "";
@@ -535,17 +535,18 @@ async function resolveContactId(contact) {
       { contact, phoneChatId, error: error.message, stack: error.stack },
       "WhatsApp getNumberId failed; using phone chat id for contact"
     );
-    return phoneChatId;
+    return [phoneChatId];
   }
 
   if (!resolvedId) {
     logger.info({ contact, phoneChatId, resolvedId }, "Using phone chat id for WhatsApp contact");
-    return phoneChatId;
+    return [phoneChatId];
   }
+  const contactIds = resolvedId === phoneChatId ? [phoneChatId] : [resolvedId, phoneChatId];
   if (resolvedId.endsWith("@lid")) {
-    logger.info({ contact, phoneChatId, resolvedId }, "Using resolved LID for WhatsApp contact");
+    logger.info({ contact, phoneChatId, resolvedId }, "Trying resolved LID before phone chat id for WhatsApp contact");
   }
-  return resolvedId;
+  return contactIds;
 }
 
 async function sendContactMessage({ contact, message, imageBase64, imageFilename }) {
@@ -555,29 +556,35 @@ async function sendContactMessage({ contact, message, imageBase64, imageFilename
     throw error;
   }
 
-  const contactId = await resolveContactId(contact);
-  if (!contactId) {
+  const contactIds = await resolveContactIds(contact);
+  if (!contactIds.length) {
     const error = new Error("WhatsApp contact not found.");
     error.statusCode = 404;
     throw error;
   }
 
   const media = buildImageMedia(imageBase64, imageFilename);
-  const sentMessage = media
-    ? await client.sendMessage(contactId, media, { caption: message })
-    : await client.sendMessage(contactId, message);
-  const messageId = sentMessage && sentMessage.id ? sentMessage.id._serialized : "";
-  if (!messageId) {
-    const error = new Error("WhatsApp did not confirm the contact message send.");
-    error.statusCode = 502;
-    logger.error({ contact, contactId, sentMessage }, "WhatsApp contact send returned no message id");
-    throw error;
+  const attempts = [];
+  for (const contactId of contactIds) {
+    const sentMessage = media
+      ? await client.sendMessage(contactId, media, { caption: message })
+      : await client.sendMessage(contactId, message);
+    const messageId = sentMessage && sentMessage.id ? sentMessage.id._serialized : "";
+    attempts.push({ contactId, messageId });
+    if (messageId) {
+      logger.info({ contact, contactId, messageId }, "WhatsApp contact message sent");
+      return {
+        messageId,
+        contactId,
+        sentAt: new Date().toISOString(),
+      };
+    }
+    logger.warn({ contact, contactId, sentMessage }, "WhatsApp contact send returned no message id; trying next contact id");
   }
-  logger.info({ contact, contactId, messageId }, "WhatsApp contact message sent");
-  return {
-    messageId,
-    sentAt: new Date().toISOString(),
-  };
+  const error = new Error("WhatsApp did not confirm the contact message send.");
+  error.statusCode = 502;
+  logger.error({ contact, attempts }, "WhatsApp contact send failed for all contact ids");
+  throw error;
 }
 
 module.exports = {
