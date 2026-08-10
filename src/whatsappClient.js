@@ -13,6 +13,20 @@ const STATUS = {
   DISCONNECTED: "disconnected",
 };
 
+const UNHEALTHY_WA_STATES = new Set([
+  "CONFLICT",
+  "UNPAIRED",
+  "UNPAIRED_IDLE",
+  "UNLAUNCHED",
+  "PROXYBLOCK",
+  "TOS_BLOCK",
+  "SMB_TOS_BLOCK",
+  "DEPRECATED_VERSION",
+]);
+
+const HEALTH_CHECK_INTERVAL_MS = Number(process.env.WHATSAPP_HEALTH_CHECK_INTERVAL_MS || 90000);
+const HEALTH_CHECK_TIMEOUT_MS = Number(process.env.WHATSAPP_HEALTH_CHECK_TIMEOUT_MS || 15000);
+
 let client;
 let whatsappStatus = STATUS.STARTING;
 let currentQrDataUrl = "";
@@ -20,6 +34,8 @@ let cachedGroupId = "";
 let cachedGroupName = "";
 let initializing = false;
 let initializePromise = null;
+let healthCheckTimer = null;
+let healthCheckRunning = false;
 
 function wait(ms) {
   return new Promise((resolve) => {
@@ -118,6 +134,82 @@ async function destroyExistingClient(reason) {
       { reason, error: error.message, stack: error.stack },
       "Unable to destroy existing WhatsApp client"
     );
+  }
+}
+
+// Marks the client unhealthy from any code path (event handler or health
+// check) so requireReadyClient() and /qr both see it immediately, instead of
+// only reacting to whatsapp-web.js's own "disconnected" event, which is not
+// reliably emitted on every real disconnect (silent/"ghost" connections).
+function markDisconnected(reason) {
+  if (whatsappStatus === STATUS.DISCONNECTED) {
+    return;
+  }
+  whatsappStatus = STATUS.DISCONNECTED;
+  cachedGroupId = "";
+  cachedGroupName = "";
+  currentQrDataUrl = "";
+  initializing = false;
+  stopHealthCheck();
+  logger.warn({ reason }, "WhatsApp marked disconnected");
+}
+
+function withTimeout(promise, ms, label) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+// whatsapp-web.js can leave the client in a "ghost ready" state: the last
+// event we saw was `ready`, but the underlying Puppeteer page/session is no
+// longer actually connected, and no `disconnected` event ever fires to tell
+// us. client.getState() talks to the live page, so it is used here as an
+// active cross-check instead of only trusting cached event state.
+async function runHealthCheck() {
+  if (healthCheckRunning || !client || whatsappStatus !== STATUS.READY) {
+    return;
+  }
+  healthCheckRunning = true;
+  try {
+    const state = await withTimeout(client.getState(), HEALTH_CHECK_TIMEOUT_MS, "getState()");
+    if (state !== "CONNECTED") {
+      logger.warn({ state }, "WhatsApp health check found non-CONNECTED state");
+      markDisconnected(`health check state=${state}`);
+      await destroyExistingClient("health check unhealthy state");
+    }
+  } catch (error) {
+    logger.warn(
+      { error: error.message, stack: error.stack },
+      "WhatsApp health check failed; treating client as disconnected"
+    );
+    markDisconnected(`health check error: ${error.message}`);
+    await destroyExistingClient("health check error");
+  } finally {
+    healthCheckRunning = false;
+  }
+}
+
+function startHealthCheck() {
+  stopHealthCheck();
+  if (HEALTH_CHECK_INTERVAL_MS <= 0) {
+    return;
+  }
+  healthCheckTimer = setInterval(() => {
+    runHealthCheck().catch((error) => {
+      logger.warn({ error: error.message, stack: error.stack }, "Unhandled health check error");
+    });
+  }, HEALTH_CHECK_INTERVAL_MS);
+  if (typeof healthCheckTimer.unref === "function") {
+    healthCheckTimer.unref();
+  }
+}
+
+function stopHealthCheck() {
+  if (healthCheckTimer) {
+    clearInterval(healthCheckTimer);
+    healthCheckTimer = null;
   }
 }
 
@@ -360,6 +452,12 @@ async function initializeInternal() {
   });
 
   client.on("authenticated", () => {
+    // whatsapp-web.js is known to fire authenticated/ready more than once
+    // during initial sync; only act (and log) on the first occurrence so
+    // duplicate events don't spam logs or reset already-good state.
+    if (whatsappStatus === STATUS.AUTHENTICATED || whatsappStatus === STATUS.READY) {
+      return;
+    }
     whatsappStatus = STATUS.AUTHENTICATED;
     currentQrDataUrl = "";
     logger.info("WhatsApp authenticated");
@@ -369,13 +467,33 @@ async function initializeInternal() {
     whatsappStatus = STATUS.QR_REQUIRED;
     cachedGroupId = "";
     cachedGroupName = "";
+    stopHealthCheck();
     logger.error({ message }, "WhatsApp auth_failure");
   });
 
   client.on("ready", async () => {
+    if (whatsappStatus === STATUS.READY) {
+      return;
+    }
     whatsappStatus = STATUS.READY;
     currentQrDataUrl = "";
     logger.info("WhatsApp client ready");
+    startHealthCheck();
+  });
+
+  // change_state reflects whatsapp-web.js's own internal WAState (from the
+  // live page), which can diverge from our event-driven whatsappStatus.
+  // Bad states (conflict/unpaired/blocked) are treated as an immediate
+  // disconnect instead of waiting for the next health-check tick or for a
+  // `disconnected` event that may never come.
+  client.on("change_state", (state) => {
+    logger.info({ state }, "WhatsApp state changed");
+    if (UNHEALTHY_WA_STATES.has(state)) {
+      markDisconnected(`change_state=${state}`);
+      destroyExistingClient(`change_state=${state}`).catch((error) => {
+        logger.warn({ error: error.message }, "Unable to destroy client after bad change_state");
+      });
+    }
   });
 
   client.on("message", async (message) => {
@@ -410,13 +528,8 @@ async function initializeInternal() {
   });
 
   client.on("disconnected", (reason) => {
-    whatsappStatus = STATUS.DISCONNECTED;
-    cachedGroupId = "";
-    cachedGroupName = "";
-    currentQrDataUrl = "";
-    initializing = false;
+    markDisconnected(`disconnected event: ${reason}`);
     client = undefined;
-    logger.warn({ reason }, "WhatsApp disconnected");
   });
 
   client.on("loading_screen", (percent, message) => {
@@ -438,6 +551,7 @@ async function initializeInternal() {
     cachedGroupId = "";
     cachedGroupName = "";
     currentQrDataUrl = "";
+    stopHealthCheck();
     throw error;
   } finally {
     initializing = false;
