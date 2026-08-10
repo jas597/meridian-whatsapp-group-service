@@ -1,7 +1,19 @@
 const express = require("express");
+const rateLimit = require("express-rate-limit");
 
 function createStatusRouter({ whatsappClient }) {
   const router = express.Router();
+
+  // /qr can trigger a full reinitialize() (Puppeteer relaunch) when status is
+  // disconnected/starting; without a limiter, rapid manual refreshes or a
+  // monitor polling this page can repeatedly relaunch the client and worsen
+  // instability instead of recovering from it.
+  const qrLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    limit: 6,
+    standardHeaders: true,
+    legacyHeaders: false,
+  });
 
   router.get("/health", (req, res) => {
     return res.json({
@@ -12,7 +24,7 @@ function createStatusRouter({ whatsappClient }) {
     });
   });
 
-  router.get("/qr", async (req, res) => {
+  router.get("/qr", qrLimiter, async (req, res) => {
     const expectedKey = process.env.QR_PAGE_SECRET;
     const key = String(req.query.key || "");
 
