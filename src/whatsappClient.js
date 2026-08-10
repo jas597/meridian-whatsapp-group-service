@@ -657,36 +657,51 @@ async function verifyRecentContactMessage({ contact, contactId, message, attempt
   if (verifyDelayMs > 0) {
     await wait(Math.min(10000, verifyDelayMs));
   }
-  try {
-    const chat = await client.getChatById(contactId);
-    if (!chat || typeof chat.fetchMessages !== "function") {
+
+  // Right after a fresh QR pairing, whatsapp-web.js's local Store hasn't
+  // finished syncing chat history yet, so getChatById() can throw for chats
+  // that genuinely exist (a minified, hard-to-read "r: r" Puppeteer
+  // evaluate() error). That's transient, not a real failure, so retry a
+  // few times with backoff instead of giving up on the first throw.
+  const verifyAttempts = Math.max(1, Number(process.env.WHATSAPP_CONTACT_VERIFY_ATTEMPTS || 3));
+  const verifyRetryDelayMs = Number(process.env.WHATSAPP_CONTACT_VERIFY_RETRY_DELAY_MS || 4000);
+
+  for (let attempt = 1; attempt <= verifyAttempts; attempt += 1) {
+    try {
+      const chat = await client.getChatById(contactId);
+      if (!chat || typeof chat.fetchMessages !== "function") {
+        return "";
+      }
+      const recentMessages = await chat.fetchMessages({ limit: 12 });
+      const expectedBody = String(message || "").trim();
+      for (const recentMessage of recentMessages.slice().reverse()) {
+        if (!recentMessage || !recentMessage.fromMe) {
+          continue;
+        }
+        const timestampMs = Number(recentMessage.timestamp || 0) * 1000;
+        if (timestampMs && timestampMs < attemptStartedAtMs - 10000) {
+          continue;
+        }
+        const recentBody = String(recentMessage.body || recentMessage.caption || "").trim();
+        if (expectedBody && recentBody !== expectedBody) {
+          continue;
+        }
+        const messageId = messageSerializedId(recentMessage);
+        if (messageId) {
+          logger.info({ contact, contactId, messageId, attempt }, "Verified WhatsApp contact message in chat history");
+          return messageId;
+        }
+      }
       return "";
-    }
-    const recentMessages = await chat.fetchMessages({ limit: 12 });
-    const expectedBody = String(message || "").trim();
-    for (const recentMessage of recentMessages.slice().reverse()) {
-      if (!recentMessage || !recentMessage.fromMe) {
-        continue;
-      }
-      const timestampMs = Number(recentMessage.timestamp || 0) * 1000;
-      if (timestampMs && timestampMs < attemptStartedAtMs - 10000) {
-        continue;
-      }
-      const recentBody = String(recentMessage.body || recentMessage.caption || "").trim();
-      if (expectedBody && recentBody !== expectedBody) {
-        continue;
-      }
-      const messageId = messageSerializedId(recentMessage);
-      if (messageId) {
-        logger.info({ contact, contactId, messageId }, "Verified WhatsApp contact message in chat history");
-        return messageId;
+    } catch (error) {
+      logger.warn(
+        { contact, contactId, attempt, verifyAttempts, error: error.message, stack: error.stack },
+        "Unable to verify WhatsApp contact message in chat history"
+      );
+      if (attempt < verifyAttempts) {
+        await wait(verifyRetryDelayMs);
       }
     }
-  } catch (error) {
-    logger.warn(
-      { contact, contactId, error: error.message, stack: error.stack },
-      "Unable to verify WhatsApp contact message in chat history"
-    );
   }
   return "";
 }
