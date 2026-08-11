@@ -632,7 +632,7 @@ function normalizeContactTarget(contact) {
   return digits;
 }
 
-function resolveContactIds(contact) {
+async function resolveContactIds(contact, readyClient) {
   const normalized = normalizeContactTarget(contact);
   if (!normalized) {
     return [];
@@ -640,6 +640,30 @@ function resolveContactIds(contact) {
   if (normalized.endsWith("@c.us") || normalized.endsWith("@g.us") || normalized.endsWith("@lid")) {
     return [normalized];
   }
+
+  // Don't guess the id format. WhatsApp's rollout of @lid contact ids means
+  // "digits@c.us" is not always the id that actually exists in the client's
+  // Store anymore. getNumberId() asks WhatsApp to resolve the canonical id
+  // for this phone number. Sending to a guessed/wrong id can resolve without
+  // throwing but never confirm (empty message id), and getChatById() on it
+  // fails every time - exactly the persistent (non-transient) failure seen
+  // in production for this contact.
+  if (readyClient && typeof readyClient.getNumberId === "function") {
+    try {
+      const resolved = await readyClient.getNumberId(normalized);
+      if (resolved && resolved._serialized) {
+        logger.info({ contact, resolvedId: resolved._serialized }, "Resolved WhatsApp contact id via getNumberId");
+        return [resolved._serialized];
+      }
+      logger.warn({ contact }, "getNumberId() found no WhatsApp account for this contact; falling back to guessed id");
+    } catch (error) {
+      logger.warn(
+        { contact, error: error.message, stack: error.stack },
+        "getNumberId() failed; falling back to guessed id"
+      );
+    }
+  }
+
   const phoneChatId = `${normalized}@c.us`;
   logger.info({ contact, phoneChatId }, "Using phone chat id for WhatsApp contact");
   return [phoneChatId];
@@ -709,7 +733,7 @@ async function verifyRecentContactMessage({ contact, contactId, message, attempt
 async function sendContactMessage({ contact, message, imageBase64, imageFilename }) {
   const readyClient = requireReadyClient();
 
-  const contactIds = resolveContactIds(contact);
+  const contactIds = await resolveContactIds(contact, readyClient);
   if (!contactIds.length) {
     const error = new Error("WhatsApp contact not found.");
     error.statusCode = 404;
