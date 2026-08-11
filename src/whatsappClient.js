@@ -805,6 +805,7 @@ module.exports = {
   getQrDataUrl,
   listGroups,
   listInboundMessages,
+  appendInboundMessage,
   sendGroupMessage,
   sendContactMessage,
   _STATUS: STATUS,
