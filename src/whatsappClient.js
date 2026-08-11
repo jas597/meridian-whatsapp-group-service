@@ -641,32 +641,34 @@ async function resolveContactIds(contact, readyClient) {
     return [normalized];
   }
 
-  // Don't guess the id format. WhatsApp's rollout of @lid contact ids means
-  // "digits@c.us" is not always the id that actually exists in the client's
-  // Store anymore. getNumberId() asks WhatsApp to resolve the canonical id
-  // for this phone number. Sending to a guessed/wrong id can resolve without
-  // throwing but never confirm (empty message id), and getChatById() on it
-  // fails every time - exactly the persistent (non-transient) failure seen
-  // in production for this contact.
+  // sendMessage() internally resolves the chat via findOrCreateLatestChat(),
+  // which (confirmed in production) silently returns nothing for a brand-new
+  // conversation addressed by an @lid id - the send then no-ops with no
+  // error, no message id, nothing. @c.us (phone-number-based) appears to be
+  // required for *creating* a new chat; @lid only seems to work once a chat
+  // already exists. Try @c.us first for the actual send. Still resolve the
+  // canonical @lid id via getNumberId() and offer it as a second candidate,
+  // since some accounts may only be reachable that way.
+  const phoneChatId = `${normalized}@c.us`;
+  const candidates = [phoneChatId];
+
   if (readyClient && typeof readyClient.getNumberId === "function") {
     try {
       const resolved = await readyClient.getNumberId(normalized);
-      if (resolved && resolved._serialized) {
+      if (resolved && resolved._serialized && resolved._serialized !== phoneChatId) {
         logger.info({ contact, resolvedId: resolved._serialized }, "Resolved WhatsApp contact id via getNumberId");
-        return [resolved._serialized];
+        candidates.push(resolved._serialized);
       }
-      logger.warn({ contact }, "getNumberId() found no WhatsApp account for this contact; falling back to guessed id");
     } catch (error) {
       logger.warn(
         { contact, error: error.message, stack: error.stack },
-        "getNumberId() failed; falling back to guessed id"
+        "getNumberId() failed; continuing with phone chat id only"
       );
     }
   }
 
-  const phoneChatId = `${normalized}@c.us`;
-  logger.info({ contact, phoneChatId }, "Using phone chat id for WhatsApp contact");
-  return [phoneChatId];
+  logger.info({ contact, candidates }, "Resolved WhatsApp contact id candidates");
+  return candidates;
 }
 
 function messageSerializedId(message) {
@@ -679,10 +681,6 @@ function messageSerializedId(message) {
 // version.
 function rawMessageId(message) {
   return message && message.id ? String(message.id.id || "") : "";
-}
-
-function isLidContactId(contactId) {
-  return String(contactId || "").endsWith("@lid");
 }
 
 const MESSAGE_ACK = {
@@ -733,63 +731,6 @@ function waitForMessageAck(rawId, timeoutMs) {
   });
 }
 
-async function verifyRecentContactMessage({ contact, contactId, message, attemptStartedAtMs }) {
-  if (!client || typeof client.getChatById !== "function") {
-    return "";
-  }
-  const verifyDelayMs = Number(process.env.WHATSAPP_CONTACT_VERIFY_DELAY_MS || 2500);
-  if (verifyDelayMs > 0) {
-    await wait(Math.min(10000, verifyDelayMs));
-  }
-
-  // Right after a fresh QR pairing, whatsapp-web.js's local Store hasn't
-  // finished syncing chat history yet, so getChatById() can throw for chats
-  // that genuinely exist (a minified, hard-to-read "r: r" Puppeteer
-  // evaluate() error). That's transient, not a real failure, so retry a
-  // few times with backoff instead of giving up on the first throw.
-  const verifyAttempts = Math.max(1, Number(process.env.WHATSAPP_CONTACT_VERIFY_ATTEMPTS || 3));
-  const verifyRetryDelayMs = Number(process.env.WHATSAPP_CONTACT_VERIFY_RETRY_DELAY_MS || 4000);
-
-  for (let attempt = 1; attempt <= verifyAttempts; attempt += 1) {
-    try {
-      const chat = await client.getChatById(contactId);
-      if (!chat || typeof chat.fetchMessages !== "function") {
-        return "";
-      }
-      const recentMessages = await chat.fetchMessages({ limit: 12 });
-      const expectedBody = String(message || "").trim();
-      for (const recentMessage of recentMessages.slice().reverse()) {
-        if (!recentMessage || !recentMessage.fromMe) {
-          continue;
-        }
-        const timestampMs = Number(recentMessage.timestamp || 0) * 1000;
-        if (timestampMs && timestampMs < attemptStartedAtMs - 10000) {
-          continue;
-        }
-        const recentBody = String(recentMessage.body || recentMessage.caption || "").trim();
-        if (expectedBody && recentBody !== expectedBody) {
-          continue;
-        }
-        const messageId = messageSerializedId(recentMessage);
-        if (messageId) {
-          logger.info({ contact, contactId, messageId, attempt }, "Verified WhatsApp contact message in chat history");
-          return messageId;
-        }
-      }
-      return "";
-    } catch (error) {
-      logger.warn(
-        { contact, contactId, attempt, verifyAttempts, error: error.message, stack: error.stack },
-        "Unable to verify WhatsApp contact message in chat history"
-      );
-      if (attempt < verifyAttempts) {
-        await wait(verifyRetryDelayMs);
-      }
-    }
-  }
-  return "";
-}
-
 async function sendContactMessage({ contact, message, imageBase64, imageFilename }) {
   const readyClient = requireReadyClient();
 
@@ -800,10 +741,16 @@ async function sendContactMessage({ contact, message, imageBase64, imageFilename
     throw error;
   }
 
+  // getChatById()-based chat-history verification has proven unreliable in
+  // production (throws even for ids that should work), and sendMessage()
+  // not throwing is NOT reliable evidence of delivery either - confirmed
+  // live, a send reported this way never actually reached the recipient.
+  // message_ack is WhatsApp's own delivery signal; only that (ACK_SERVER or
+  // higher) counts as real confirmation, for every candidate id, not just
+  // @lid ones.
   const media = buildImageMedia(imageBase64, imageFilename);
   const attempts = [];
   for (const contactId of contactIds) {
-    const attemptStartedAtMs = Date.now();
     const sentMessage = media
       ? await readyClient.sendMessage(contactId, media, { caption: message })
       : await readyClient.sendMessage(contactId, message);
@@ -817,51 +764,33 @@ async function sendContactMessage({ contact, message, imageBase64, imageFilename
       };
     }
 
-    // getChatById() has broken/partial support for @lid contact ids in this
-    // whatsapp-web.js version - it throws every time, retries included, even
-    // against a correctly-resolved @lid id (confirmed in production), so
-    // chat-history verification is not an option here. sendMessage() not
-    // throwing is NOT reliable evidence of delivery either - confirmed live
-    // in production, a send reported this way never actually reached the
-    // recipient. message_ack is WhatsApp's own delivery signal; only that
-    // (ACK_SERVER or higher) counts as real confirmation.
-    if (isLidContactId(contactId)) {
-      const rawId = rawMessageId(sentMessage);
-      const ackTimeoutMs = Number(process.env.WHATSAPP_LID_ACK_TIMEOUT_MS || 20000);
-      const acknowledged = await waitForMessageAck(rawId, ackTimeoutMs);
-      attempts.push({ contactId, directMessageId, rawId, acknowledged });
-      if (acknowledged) {
-        const messageId = rawId || contactId;
-        logger.info({ contact, contactId, messageId }, "WhatsApp contact message sent and acknowledged by server");
-        return {
-          messageId,
-          contactId,
-          sentAt: new Date().toISOString(),
-        };
-      }
-      logger.warn(
-        { contact, contactId, rawId },
-        "Contact uses an @lid id; no message_ack received within timeout, treating as not delivered"
-      );
+    const rawId = rawMessageId(sentMessage);
+    if (!rawId) {
+      // sendMessage() returned nothing usable at all - internally this means
+      // WhatsApp's own findOrCreateLatestChat() could not resolve/create a
+      // chat for this id, so nothing was actually sent. No point waiting for
+      // an ack that has nothing to match against; move to the next
+      // candidate id immediately.
+      attempts.push({ contactId, directMessageId, rawId, acknowledged: false, reason: "no chat/message created" });
+      logger.warn({ contact, contactId }, "sendMessage() returned no message at all (chat could not be created for this id); trying next contact id");
       continue;
     }
 
-    const verifiedMessageId = await verifyRecentContactMessage({
-      contact,
-      contactId,
-      message,
-      attemptStartedAtMs,
-    });
-    attempts.push({ contactId, directMessageId, verifiedMessageId });
-    if (verifiedMessageId) {
-      logger.info({ contact, contactId, messageId: verifiedMessageId }, "WhatsApp contact message sent");
+    const ackTimeoutMs = Number(process.env.WHATSAPP_LID_ACK_TIMEOUT_MS || 20000);
+    const acknowledged = await waitForMessageAck(rawId, ackTimeoutMs);
+    attempts.push({ contactId, directMessageId, rawId, acknowledged });
+    if (acknowledged) {
+      logger.info({ contact, contactId, messageId: rawId }, "WhatsApp contact message sent and acknowledged by server");
       return {
-        messageId: verifiedMessageId,
+        messageId: rawId,
         contactId,
         sentAt: new Date().toISOString(),
       };
     }
-    logger.warn({ contact, contactId, sentMessage }, "WhatsApp contact send returned no message id; trying next contact id");
+    logger.warn(
+      { contact, contactId, rawId },
+      "No message_ack received within timeout, treating as not delivered; trying next contact id"
+    );
   }
   const error = new Error("WhatsApp did not confirm the contact message send.");
   error.statusCode = 502;
