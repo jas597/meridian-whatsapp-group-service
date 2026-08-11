@@ -5,8 +5,11 @@ const helmet = require("helmet");
 
 const logger = require("./src/utils/logger");
 const whatsappClient = require("./src/whatsappClient");
+const cloudApiClient = require("./src/cloudApiClient");
 const { createMessageRouter } = require("./src/routes/messageRoutes");
 const { createStatusRouter } = require("./src/routes/statusRoutes");
+const { createCloudWebhookRouter } = require("./src/routes/cloudWebhookRoutes");
+const { createCloudMessageRouter } = require("./src/routes/cloudMessageRoutes");
 const { errorHandler, notFoundHandler } = require("./src/middleware/errorHandler");
 
 process.on("unhandledRejection", (reason) => {
@@ -28,6 +31,7 @@ process.on("uncaughtException", (error) => {
 function createApp(options = {}) {
   const app = express();
   const client = options.whatsappClient || whatsappClient;
+  const cloudClient = options.cloudApiClient || cloudApiClient;
 
   app.disable("x-powered-by");
   app.set("trust proxy", 1);
@@ -36,6 +40,8 @@ function createApp(options = {}) {
 
   app.use("/", createStatusRouter({ whatsappClient: client }));
   app.use("/", createMessageRouter({ whatsappClient: client }));
+  app.use("/", createCloudWebhookRouter({ appendInboundMessage: client.appendInboundMessage }));
+  app.use("/", createCloudMessageRouter({ cloudApiClient: cloudClient }));
   app.use(notFoundHandler);
   app.use(errorHandler);
 
