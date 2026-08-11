@@ -673,8 +673,64 @@ function messageSerializedId(message) {
   return message && message.id && message.id._serialized ? message.id._serialized : "";
 }
 
+// The raw WhatsApp message id (a string like "3EB0...") is assigned
+// independent of the chat/remote key, so it stays reliable even for @lid
+// contacts where _serialized construction is broken in this library
+// version.
+function rawMessageId(message) {
+  return message && message.id ? String(message.id.id || "") : "";
+}
+
 function isLidContactId(contactId) {
   return String(contactId || "").endsWith("@lid");
+}
+
+const MESSAGE_ACK = {
+  ERROR: -1,
+  PENDING: 0,
+  SERVER: 1,
+};
+
+// Chat-history verification (getChatById) is broken for @lid contacts, and
+// "sendMessage() didn't throw" turned out to be an unreliable signal too -
+// it can resolve even when WhatsApp never actually delivers the message.
+// message_ack is WhatsApp's own delivery signal: ACK_SERVER (1) or higher
+// means the server actually accepted the message, which is the only signal
+// here we can trust as real confirmation. No ack (or ACK_ERROR) means the
+// send did not go through, regardless of what sendMessage() resolved with.
+function waitForMessageAck(rawId, timeoutMs) {
+  return new Promise((resolve) => {
+    if (!client || typeof client.on !== "function" || !rawId) {
+      resolve(false);
+      return;
+    }
+    let settled = false;
+    const finish = (result) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (typeof client.off === "function") {
+        client.off("message_ack", handler);
+      }
+      clearTimeout(timer);
+      resolve(result);
+    };
+    const handler = (message, ack) => {
+      if (rawMessageId(message) !== rawId) {
+        return;
+      }
+      if (ack === MESSAGE_ACK.ERROR) {
+        finish(false);
+        return;
+      }
+      if (ack >= MESSAGE_ACK.SERVER) {
+        finish(true);
+      }
+    };
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    client.on("message_ack", handler);
+  });
 }
 
 async function verifyRecentContactMessage({ contact, contactId, message, attemptStartedAtMs }) {
@@ -763,22 +819,31 @@ async function sendContactMessage({ contact, message, imageBase64, imageFilename
 
     // getChatById() has broken/partial support for @lid contact ids in this
     // whatsapp-web.js version - it throws every time, retries included, even
-    // against a correctly-resolved @lid id (confirmed in production). Since
-    // sendMessage() above did not throw, the send itself almost certainly
-    // went through; we just can't confirm it through chat-history lookup for
-    // this id type. Report success with no messageId rather than a false
-    // "did not confirm" failure - callers already treat empty messageId as
-    // "sent, unconfirmed" rather than failed.
+    // against a correctly-resolved @lid id (confirmed in production), so
+    // chat-history verification is not an option here. sendMessage() not
+    // throwing is NOT reliable evidence of delivery either - confirmed live
+    // in production, a send reported this way never actually reached the
+    // recipient. message_ack is WhatsApp's own delivery signal; only that
+    // (ACK_SERVER or higher) counts as real confirmation.
     if (isLidContactId(contactId)) {
+      const rawId = rawMessageId(sentMessage);
+      const ackTimeoutMs = Number(process.env.WHATSAPP_LID_ACK_TIMEOUT_MS || 20000);
+      const acknowledged = await waitForMessageAck(rawId, ackTimeoutMs);
+      attempts.push({ contactId, directMessageId, rawId, acknowledged });
+      if (acknowledged) {
+        const messageId = rawId || contactId;
+        logger.info({ contact, contactId, messageId }, "WhatsApp contact message sent and acknowledged by server");
+        return {
+          messageId,
+          contactId,
+          sentAt: new Date().toISOString(),
+        };
+      }
       logger.warn(
-        { contact, contactId },
-        "Contact uses an @lid id; chat-history verification is unreliable for @lid in this whatsapp-web.js version. Reporting sent-but-unconfirmed instead of retrying a known-broken verification."
+        { contact, contactId, rawId },
+        "Contact uses an @lid id; no message_ack received within timeout, treating as not delivered"
       );
-      return {
-        messageId: "",
-        contactId,
-        sentAt: new Date().toISOString(),
-      };
+      continue;
     }
 
     const verifiedMessageId = await verifyRecentContactMessage({
