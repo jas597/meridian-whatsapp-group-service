@@ -673,6 +673,10 @@ function messageSerializedId(message) {
   return message && message.id && message.id._serialized ? message.id._serialized : "";
 }
 
+function isLidContactId(contactId) {
+  return String(contactId || "").endsWith("@lid");
+}
+
 async function verifyRecentContactMessage({ contact, contactId, message, attemptStartedAtMs }) {
   if (!client || typeof client.getChatById !== "function") {
     return "";
@@ -748,18 +752,46 @@ async function sendContactMessage({ contact, message, imageBase64, imageFilename
       ? await readyClient.sendMessage(contactId, media, { caption: message })
       : await readyClient.sendMessage(contactId, message);
     const directMessageId = messageSerializedId(sentMessage);
-    const verifiedMessageId = directMessageId || await verifyRecentContactMessage({
+    if (directMessageId) {
+      logger.info({ contact, contactId, messageId: directMessageId }, "WhatsApp contact message sent");
+      return {
+        messageId: directMessageId,
+        contactId,
+        sentAt: new Date().toISOString(),
+      };
+    }
+
+    // getChatById() has broken/partial support for @lid contact ids in this
+    // whatsapp-web.js version - it throws every time, retries included, even
+    // against a correctly-resolved @lid id (confirmed in production). Since
+    // sendMessage() above did not throw, the send itself almost certainly
+    // went through; we just can't confirm it through chat-history lookup for
+    // this id type. Report success with no messageId rather than a false
+    // "did not confirm" failure - callers already treat empty messageId as
+    // "sent, unconfirmed" rather than failed.
+    if (isLidContactId(contactId)) {
+      logger.warn(
+        { contact, contactId },
+        "Contact uses an @lid id; chat-history verification is unreliable for @lid in this whatsapp-web.js version. Reporting sent-but-unconfirmed instead of retrying a known-broken verification."
+      );
+      return {
+        messageId: "",
+        contactId,
+        sentAt: new Date().toISOString(),
+      };
+    }
+
+    const verifiedMessageId = await verifyRecentContactMessage({
       contact,
       contactId,
       message,
       attemptStartedAtMs,
     });
     attempts.push({ contactId, directMessageId, verifiedMessageId });
-    const messageId = directMessageId || verifiedMessageId;
-    if (messageId) {
-      logger.info({ contact, contactId, messageId }, "WhatsApp contact message sent");
+    if (verifiedMessageId) {
+      logger.info({ contact, contactId, messageId: verifiedMessageId }, "WhatsApp contact message sent");
       return {
-        messageId,
+        messageId: verifiedMessageId,
         contactId,
         sentAt: new Date().toISOString(),
       };
