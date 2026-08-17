@@ -55,15 +55,11 @@ async function start() {
   app.listen(port, "0.0.0.0", async () => {
     logger.info({ port }, "meridian-whatsapp-group-service started");
 
-    try {
-      logger.info("Initializing WhatsApp client");
-      await whatsappClient.initializeWhatsApp();
-    } catch (error) {
-      logger.error(
-        { error: error.message, stack: error.stack },
-        "WhatsApp initialization failed"
-      );
-    }
+    logger.info("Initializing WhatsApp client");
+    // initializeWithRetry() never throws - a failed attempt schedules its
+    // own backoff retry internally instead of leaving the service stuck
+    // disconnected until someone happens to load /qr again.
+    await whatsappClient.initializeWithRetry();
   });
 }
 
