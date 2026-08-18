@@ -201,6 +201,25 @@ test("rejects contact message when WhatsApp does not confirm send", async () => 
   assert.equal(response.body.error, "WhatsApp did not confirm the contact message send.");
 });
 
+test("propagates SEND_ATTEMPTED_UNCONFIRMED state so callers don't record it as a plain send failure", async () => {
+  const app = buildApp({
+    sendContactMessage: async () => {
+      const error = new Error("WhatsApp could not positively confirm the contact message send.");
+      error.statusCode = 502;
+      error.state = "SEND_ATTEMPTED_UNCONFIRMED";
+      throw error;
+    },
+  });
+  const response = await request(app)
+    .post("/send-contact-message")
+    .set("Authorization", "Bearer test-secret")
+    .send({ contact: "+16475550123", message: "Hello" });
+
+  assert.equal(response.status, 502);
+  assert.equal(response.body.success, false);
+  assert.equal(response.body.state, "SEND_ATTEMPTED_UNCONFIRMED");
+});
+
 test("rejects missing contact", async () => {
   const app = buildApp();
   const response = await request(app)
