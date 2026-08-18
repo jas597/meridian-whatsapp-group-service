@@ -26,6 +26,21 @@ const UNHEALTHY_WA_STATES = new Set([
 
 const HEALTH_CHECK_INTERVAL_MS = Number(process.env.WHATSAPP_HEALTH_CHECK_INTERVAL_MS || 90000);
 const HEALTH_CHECK_TIMEOUT_MS = Number(process.env.WHATSAPP_HEALTH_CHECK_TIMEOUT_MS || 15000);
+const INIT_RETRY_DELAY_MS = Number(process.env.WHATSAPP_INIT_RETRY_DELAY_MS || 15000);
+const INIT_MAX_RETRY_DELAY_MS = Number(process.env.WHATSAPP_INIT_MAX_RETRY_DELAY_MS || 300000);
+
+// Must match the clientId passed to LocalAuth in createClient() below - kept
+// as one constant so the profile-lock cleanup can never drift out of sync
+// with the directory whatsapp-web.js actually launches Chromium in.
+const WHATSAPP_CLIENT_ID = "meridian-staff";
+
+// Chromium creates these directly in the profile (userDataDir) root to stop
+// two instances from sharing one profile. They are removed automatically on
+// a clean shutdown, but survive an unclean one (crash, OOM kill, container
+// restart) - Render's persistent disk keeps them even though the process
+// that created them is gone, causing the next launch to fail with "Failed to
+// launch the browser process ... profile appears to be in use".
+const STALE_LOCK_FILE_NAMES = ["SingletonLock", "SingletonSocket", "SingletonCookie"];
 
 let client;
 let whatsappStatus = STATUS.STARTING;
@@ -36,6 +51,8 @@ let initializing = false;
 let initializePromise = null;
 let healthCheckTimer = null;
 let healthCheckRunning = false;
+let retryTimer = null;
+let retryDelayMs = INIT_RETRY_DELAY_MS;
 
 function wait(ms) {
   return new Promise((resolve) => {
@@ -104,6 +121,85 @@ function getStatus() {
 
 function getQrDataUrl() {
   return currentQrDataUrl;
+}
+
+function sessionPath() {
+  return process.env.WHATSAPP_SESSION_PATH || "/var/data/whatsapp-session";
+}
+
+// Mirrors whatsapp-web.js's own LocalAuth path (dataPath + "session-" +
+// clientId) so the lock cleanup always looks in exactly the directory
+// Chromium will actually launch in.
+function sessionUserDataDir() {
+  return path.join(sessionPath(), `session-${WHATSAPP_CLIENT_ID}`);
+}
+
+function isProcessAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return false;
+  }
+  try {
+    // Signal 0 sends nothing; it only checks whether the process exists and
+    // is reachable by this user, without affecting it.
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return false;
+  }
+}
+
+// SingletonLock is a symlink whose target encodes "<hostname>-<pid>". If
+// that pid is not a live process, the lock predates this run (the normal
+// case after a crash, an OOM kill, or a container restart on this
+// single-instance service - the persistent disk keeps the lock file, but the
+// process that held it no longer exists in the new container) and is safe to
+// clear. If the pid *is* alive, something may genuinely still hold the
+// profile, so the lock is left in place rather than risk two Chromium
+// instances on the same profile at once.
+function removeStaleSingletonLocks(dirPath) {
+  const lockPath = path.join(dirPath, "SingletonLock");
+  let lockTarget = "";
+  let hasLock = true;
+
+  try {
+    lockTarget = fs.readlinkSync(lockPath);
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      hasLock = false;
+    }
+    // Any other error (not a symlink, permissions, etc.) - can't confirm a
+    // live owner, so fall through and treat the lock as stale. On this
+    // service's single-instance, ephemeral-container deployment, a lock
+    // that survives to this point was always left by a process that no
+    // longer exists in the current container.
+  }
+
+  if (!hasLock) {
+    return false;
+  }
+
+  const match = /-(\d+)$/.exec(lockTarget);
+  const pid = match ? Number(match[1]) : NaN;
+  if (lockTarget && isProcessAlive(pid)) {
+    logger.warn({ lockTarget }, "Chromium SingletonLock appears to be held by a live process; leaving it in place");
+    return false;
+  }
+
+  let removedAny = false;
+  for (const fileName of STALE_LOCK_FILE_NAMES) {
+    try {
+      fs.rmSync(path.join(dirPath, fileName), { force: true });
+      removedAny = true;
+    } catch (error) {
+      // Best-effort cleanup; a failure here just means Chromium's own launch
+      // will fail again below with its usual error, which is no worse than
+      // today's behavior.
+    }
+  }
+  if (removedAny) {
+    logger.info({ dirPath }, "Stale Chromium profile lock removed");
+  }
+  return removedAny;
 }
 
 function requireReadyClient() {
@@ -214,12 +310,10 @@ function stopHealthCheck() {
 }
 
 function createClient() {
-  const sessionPath = process.env.WHATSAPP_SESSION_PATH || "/var/data/whatsapp-session";
-
   return new Client({
     authStrategy: new LocalAuth({
-      clientId: "meridian-staff",
-      dataPath: sessionPath,
+      clientId: WHATSAPP_CLIENT_ID,
+      dataPath: sessionPath(),
     }),
     webVersionCache: {
       type: "remote",
@@ -536,6 +630,19 @@ async function initializeInternal() {
     logger.info({ percent, message }, "WhatsApp loading");
   });
 
+  const dirPath = sessionUserDataDir();
+  try {
+    if (removeStaleSingletonLocks(dirPath)) {
+      logger.info({ dirPath }, "Cleared stale Chromium profile lock before launch");
+    }
+  } catch (error) {
+    logger.warn(
+      { error: error.message, stack: error.stack, dirPath },
+      "Unable to check/clear Chromium profile lock; continuing with launch attempt"
+    );
+  }
+
+  const failedClient = client;
   try {
     logger.info("Calling whatsapp-web.js client.initialize()");
     await client.initialize();
@@ -544,7 +651,7 @@ async function initializeInternal() {
   } catch (error) {
     logger.error(
       { error: error.message, stack: error.stack },
-      "WhatsApp initialization error"
+      "WhatsApp initialization failed"
     );
     whatsappStatus = STATUS.DISCONNECTED;
     client = undefined;
@@ -552,9 +659,68 @@ async function initializeInternal() {
     cachedGroupName = "";
     currentQrDataUrl = "";
     stopHealthCheck();
+
+    // A partially-launched browser (Chromium started, then the page/session
+    // setup failed) can otherwise be left running as an orphan holding the
+    // profile lock, which would make every subsequent attempt fail the same
+    // way even after this one gives up. destroy() is safe to call here: it
+    // only closes the browser process if one is connected and never touches
+    // the saved LocalAuth session data (that's a separate, never-called-here
+    // logout() method).
+    try {
+      await failedClient.destroy();
+    } catch (destroyError) {
+      logger.warn(
+        { error: destroyError.message, stack: destroyError.stack },
+        "Unable to clean up browser process after failed initialization"
+      );
+    }
+
     throw error;
   } finally {
     initializing = false;
+  }
+}
+
+function clearRetryTimer() {
+  if (retryTimer) {
+    clearTimeout(retryTimer);
+    retryTimer = null;
+  }
+}
+
+function scheduleRetry() {
+  if (retryTimer) {
+    // A retry is already pending; let it run rather than stacking another
+    // one on top (this is what keeps a burst of failures from turning into
+    // overlapping retry loops).
+    return;
+  }
+  const delayMs = retryDelayMs;
+  logger.warn({ delayMs }, "WhatsApp initialization retry scheduled");
+  retryTimer = setTimeout(() => {
+    retryTimer = null;
+    initializeWithRetry();
+  }, delayMs);
+  if (typeof retryTimer.unref === "function") {
+    retryTimer.unref();
+  }
+  retryDelayMs = Math.min(retryDelayMs * 2, INIT_MAX_RETRY_DELAY_MS);
+}
+
+// Used for the initial startup attempt so a launch failure (e.g. a transient
+// Chromium/profile problem) doesn't just get logged once and left for a
+// human to notice and fix via the /qr page. Backs off exponentially between
+// attempts (capped) instead of hammering Chromium immediately again. Manual
+// reinitialization via /qr still goes through initializeWhatsApp() directly
+// and is unaffected by this loop.
+async function initializeWithRetry() {
+  clearRetryTimer();
+  try {
+    await initializeWhatsApp();
+    retryDelayMs = INIT_RETRY_DELAY_MS;
+  } catch (error) {
+    scheduleRetry();
   }
 }
 
@@ -801,6 +967,7 @@ async function sendContactMessage({ contact, message, imageBase64, imageFilename
 module.exports = {
   initialize: initializeWhatsApp,
   initializeWhatsApp,
+  initializeWithRetry,
   getStatus,
   getQrDataUrl,
   listGroups,
@@ -809,4 +976,11 @@ module.exports = {
   sendGroupMessage,
   sendContactMessage,
   _STATUS: STATUS,
+  // Exposed for unit testing only - pure filesystem/process helpers with no
+  // dependency on the module's internal WhatsApp client state.
+  _internal: {
+    isProcessAlive,
+    removeStaleSingletonLocks,
+    sessionUserDataDir,
+  },
 };
