@@ -28,6 +28,16 @@ const HEALTH_CHECK_INTERVAL_MS = Number(process.env.WHATSAPP_HEALTH_CHECK_INTERV
 const HEALTH_CHECK_TIMEOUT_MS = Number(process.env.WHATSAPP_HEALTH_CHECK_TIMEOUT_MS || 15000);
 const INIT_RETRY_DELAY_MS = Number(process.env.WHATSAPP_INIT_RETRY_DELAY_MS || 15000);
 const INIT_MAX_RETRY_DELAY_MS = Number(process.env.WHATSAPP_INIT_MAX_RETRY_DELAY_MS || 300000);
+const RESOLVE_CONTACT_TIMEOUT_MS = Number(process.env.WHATSAPP_RESOLVE_CONTACT_TIMEOUT_MS || 8000);
+// Bounded retry for one specific, confirmed-in-production false-negative:
+// sendMessage() returning nothing because its internal getChat() couldn't
+// find/create a chat for a brand-new conversation, even though WhatsApp can
+// still deliver the message. Intentionally small and fixed - never retries
+// indefinitely, and does not apply to any other failure mode (an outright
+// rejection, e.g. an unauthorized or invalid contact, is not retried here).
+const CONTACT_SEND_RETRY_ATTEMPTS = Number(process.env.WHATSAPP_CONTACT_SEND_RETRY_ATTEMPTS || 2);
+const CONTACT_SEND_RETRY_DELAY_MS = Number(process.env.WHATSAPP_CONTACT_SEND_RETRY_DELAY_MS || 3000);
+const SEND_ATTEMPTED_UNCONFIRMED = "SEND_ATTEMPTED_UNCONFIRMED";
 
 // Must match the clientId passed to LocalAuth in createClient() below - kept
 // as one constant so the profile-lock cleanup can never drift out of sync
@@ -66,6 +76,55 @@ function inboundMessagesFile() {
 
 function normalizeMessageContact(value) {
   return String(value || "").replace(/@c\.us$|@g\.us$/i, "").replace(/[^\d]/g, "");
+}
+
+function isLidId(value) {
+  return /@lid$/i.test(String(value || ""));
+}
+
+// Pure extraction step, split out from resolveSenderPhone() below purely so
+// it's unit-testable without a real (or faked) whatsapp-web.js Client/
+// Contact object. Given whatever Client.getContactById() resolved, decides
+// whether it actually represents a usable phone number - never guesses from
+// digit similarity: a still-@lid id (WhatsApp had no phone number to give
+// us) is explicitly rejected rather than stored as if it were one.
+function extractResolvedPhone(contact) {
+  const resolvedId = contact && contact.id && contact.id._serialized ? contact.id._serialized : "";
+  const resolvedNumber = contact && contact.number ? String(contact.number) : "";
+  const candidate = resolvedNumber || resolvedId;
+  if (candidate && !isLidId(candidate)) {
+    return normalizeMessageContact(candidate);
+  }
+  return "";
+}
+
+// Resolves a @lid sender back to a phone-number identity using
+// whatsapp-web.js's own contact resolution (Client.getContactById()), which
+// internally maps a lid to contact.phoneNumber when WhatsApp exposes that
+// link (see node_modules/whatsapp-web.js's injected getContactModel(): it
+// substitutes contact.phoneNumber for the id whenever the wid is a lid and a
+// phone number is available). If resolution fails, times out, or WhatsApp
+// has no phone number linked for this contact, an empty string is returned
+// and the raw lid is all that gets stored, so nothing downstream can mistake
+// it for a real phone number.
+async function resolveSenderPhone(rawSenderId) {
+  if (!client || !isLidId(rawSenderId)) {
+    return "";
+  }
+  try {
+    const contact = await withTimeout(
+      client.getContactById(rawSenderId),
+      RESOLVE_CONTACT_TIMEOUT_MS,
+      "getContactById()"
+    );
+    return extractResolvedPhone(contact);
+  } catch (error) {
+    logger.warn(
+      { rawSenderId, error: error.message, stack: error.stack },
+      "Unable to resolve @lid sender to a phone number"
+    );
+    return "";
+  }
 }
 
 function appendInboundMessage(record) {
@@ -601,18 +660,33 @@ async function initializeInternal() {
       if (!body) {
         return;
       }
-      const contact = normalizeMessageContact(author || from);
+      const rawSenderId = author || from;
+      const lid = isLidId(rawSenderId) ? normalizeMessageContact(rawSenderId) : "";
+      const resolvedPhone = lid ? await resolveSenderPhone(rawSenderId) : "";
+      // "contact" keeps its historical meaning (the identity every existing
+      // consumer reads first) but now prefers a positively resolved phone
+      // number over raw @lid digits, which were never a phone number to
+      // begin with - falls back to the previous raw-digits behavior only
+      // when resolution isn't possible, so nothing regresses for senders
+      // that were never lid-based.
+      const contact = resolvedPhone || normalizeMessageContact(rawSenderId);
       const record = {
         id: message.id && message.id._serialized ? message.id._serialized : "",
         from,
         author,
+        senderId: rawSenderId,
+        lid,
+        resolvedPhone,
         contact,
         body,
         type: message.type || "",
         receivedAt: new Date(Number(message.timestamp || 0) * 1000 || Date.now()).toISOString(),
       };
       appendInboundMessage(record);
-      logger.info({ contact, preview: body.slice(0, 120) }, "WhatsApp inbound message saved");
+      logger.info(
+        { contact, lid: lid || undefined, resolvedPhone: resolvedPhone || undefined, preview: body.slice(0, 120) },
+        "WhatsApp inbound message saved"
+      );
     } catch (error) {
       logger.warn(
         { error: error.message, stack: error.stack },
@@ -897,6 +971,34 @@ function waitForMessageAck(rawId, timeoutMs) {
   });
 }
 
+// Bounded retry for the one specific failure mode confirmed in production to
+// be a false negative: sendMessage() returns nothing (no chat/message
+// object) because its internal getChat() couldn't find/create a chat for a
+// brand-new conversation, even though WhatsApp goes on to deliver the
+// message anyway. A short, fixed number of extra attempts with a short delay
+// between them - never an unbounded loop, and this never runs for any other
+// failure shape (a thrown error, an authorization rejection, etc. all pass
+// straight through untouched).
+async function sendMessageWithChatRetry(readyClient, contactId, media, message) {
+  let lastSent;
+  for (let attempt = 1; attempt <= CONTACT_SEND_RETRY_ATTEMPTS; attempt += 1) {
+    lastSent = media
+      ? await readyClient.sendMessage(contactId, media, { caption: message })
+      : await readyClient.sendMessage(contactId, message);
+    if (lastSent) {
+      return lastSent;
+    }
+    if (attempt < CONTACT_SEND_RETRY_ATTEMPTS) {
+      logger.warn(
+        { contactId, attempt, attempts: CONTACT_SEND_RETRY_ATTEMPTS, delayMs: CONTACT_SEND_RETRY_DELAY_MS },
+        "sendMessage() returned no chat; retrying after a short delay"
+      );
+      await wait(CONTACT_SEND_RETRY_DELAY_MS);
+    }
+  }
+  return lastSent;
+}
+
 async function sendContactMessage({ contact, message, imageBase64, imageFilename }) {
   const readyClient = requireReadyClient();
 
@@ -917,9 +1019,7 @@ async function sendContactMessage({ contact, message, imageBase64, imageFilename
   const media = buildImageMedia(imageBase64, imageFilename);
   const attempts = [];
   for (const contactId of contactIds) {
-    const sentMessage = media
-      ? await readyClient.sendMessage(contactId, media, { caption: message })
-      : await readyClient.sendMessage(contactId, message);
+    const sentMessage = await sendMessageWithChatRetry(readyClient, contactId, media, message);
     const directMessageId = messageSerializedId(sentMessage);
     if (directMessageId) {
       logger.info({ contact, contactId, messageId: directMessageId }, "WhatsApp contact message sent");
@@ -932,13 +1032,16 @@ async function sendContactMessage({ contact, message, imageBase64, imageFilename
 
     const rawId = rawMessageId(sentMessage);
     if (!rawId) {
-      // sendMessage() returned nothing usable at all - internally this means
-      // WhatsApp's own findOrCreateLatestChat() could not resolve/create a
-      // chat for this id, so nothing was actually sent. No point waiting for
-      // an ack that has nothing to match against; move to the next
-      // candidate id immediately.
-      attempts.push({ contactId, directMessageId, rawId, acknowledged: false, reason: "no chat/message created" });
-      logger.warn({ contact, contactId }, "sendMessage() returned no message at all (chat could not be created for this id); trying next contact id");
+      // sendMessage() returned nothing usable at all even after the bounded
+      // retries above - internally this means WhatsApp's own
+      // findOrCreateLatestChat() could not resolve/create a chat for this
+      // id. No point waiting for an ack that has nothing to match against;
+      // move to the next candidate id.
+      attempts.push({ contactId, directMessageId, rawId, acknowledged: false, reason: "no chat/message created after retries" });
+      logger.warn(
+        { contact, contactId, retries: CONTACT_SEND_RETRY_ATTEMPTS },
+        "sendMessage() returned no message after bounded retries; trying next contact id"
+      );
       continue;
     }
 
@@ -958,9 +1061,18 @@ async function sendContactMessage({ contact, message, imageBase64, imageFilename
       "No message_ack received within timeout, treating as not delivered; trying next contact id"
     );
   }
-  const error = new Error("WhatsApp did not confirm the contact message send.");
+
+  // Every candidate id was tried (with bounded retries for the no-chat
+  // case) and none produced positive evidence of delivery. This is
+  // genuinely uncertain, not a confirmed failure - the message may still
+  // have reached the recipient (confirmed to happen in production). Callers
+  // must not record this as a plain send failure; error.state distinguishes
+  // it so they can record a distinct "attempted but unconfirmed" status
+  // instead.
+  const error = new Error("WhatsApp could not positively confirm the contact message send.");
   error.statusCode = 502;
-  logger.error({ contact, attempts }, "WhatsApp contact send failed for all contact ids");
+  error.state = SEND_ATTEMPTED_UNCONFIRMED;
+  logger.error({ contact, attempts }, "WhatsApp contact send unconfirmed for all contact ids after bounded retries");
   throw error;
 }
 
@@ -976,11 +1088,17 @@ module.exports = {
   sendGroupMessage,
   sendContactMessage,
   _STATUS: STATUS,
+  SEND_ATTEMPTED_UNCONFIRMED,
   // Exposed for unit testing only - pure filesystem/process helpers with no
   // dependency on the module's internal WhatsApp client state.
   _internal: {
     isProcessAlive,
     removeStaleSingletonLocks,
     sessionUserDataDir,
+    isLidId,
+    resolveSenderPhone,
+    extractResolvedPhone,
+    normalizeMessageContact,
+    sendMessageWithChatRetry,
   },
 };

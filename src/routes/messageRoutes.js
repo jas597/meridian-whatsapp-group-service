@@ -210,6 +210,12 @@ function createMessageRouter({ whatsappClient }) {
         success: false,
         error: errorMessage,
       };
+      // error.state distinguishes "attempted but WhatsApp never positively
+      // confirmed it" from every other kind of failure - callers must not
+      // treat the two the same (see whatsappClient.sendContactMessage()).
+      if (error.state) {
+        body.state = error.state;
+      }
       if (idempotencyKey) {
         idempotencyCache.set(idempotencyKey, {
           createdAt: Date.now(),
@@ -218,9 +224,9 @@ function createMessageRouter({ whatsappClient }) {
         });
       }
       if (statusCode >= 500) {
-        logger.error({ error: error.message, stack: error.stack, contact: validation.contact }, "WhatsApp contact send failed");
+        logger.error({ error: error.message, stack: error.stack, contact: validation.contact, state: error.state }, "WhatsApp contact send failed");
       } else {
-        logger.warn({ error: error.message, contact: validation.contact }, "WhatsApp contact send rejected");
+        logger.warn({ error: error.message, contact: validation.contact, state: error.state }, "WhatsApp contact send rejected");
       }
       return res.status(statusCode).json(body);
     }

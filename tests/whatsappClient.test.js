@@ -4,8 +4,20 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
+// Must be set before whatsappClient is required - CONTACT_SEND_RETRY_DELAY_MS
+// is read once at module load time. Keeps the retry tests below fast instead
+// of actually waiting out the production 3s delay.
+process.env.WHATSAPP_CONTACT_SEND_RETRY_DELAY_MS = "10";
+
 const whatsappClient = require("../src/whatsappClient");
-const { isProcessAlive, removeStaleSingletonLocks } = whatsappClient._internal;
+const {
+  isProcessAlive,
+  removeStaleSingletonLocks,
+  isLidId,
+  extractResolvedPhone,
+  normalizeMessageContact,
+  sendMessageWithChatRetry,
+} = whatsappClient._internal;
 
 function makeTempProfileDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "wa-profile-test-"));
@@ -119,4 +131,96 @@ test("sessionUserDataDir matches the LocalAuth clientId used by createClient", (
       process.env.WHATSAPP_SESSION_PATH = previous;
     }
   }
+});
+
+// --- @lid identity resolution ------------------------------------------
+
+test("isLidId recognizes @lid senders and rejects everything else", () => {
+  assert.equal(isLidId("134492773699746@lid"), true);
+  assert.equal(isLidId("19196243916@c.us"), false);
+  assert.equal(isLidId("12345@g.us"), false);
+  assert.equal(isLidId(""), false);
+  assert.equal(isLidId(undefined), false);
+});
+
+test("normalizeMessageContact strips @c.us/@g.us but leaves @lid digits as-is (pre-existing behavior)", () => {
+  assert.equal(normalizeMessageContact("19196243916@c.us"), "19196243916");
+  assert.equal(normalizeMessageContact("134492773699746@lid"), "134492773699746");
+});
+
+test("extractResolvedPhone prefers contact.number when it is a real phone number", () => {
+  const contact = { id: { _serialized: "134492773699746@lid" }, number: "19196243916" };
+  assert.equal(extractResolvedPhone(contact), "19196243916");
+});
+
+test("extractResolvedPhone falls back to contact.id._serialized when number is missing but id resolved to @c.us", () => {
+  const contact = { id: { _serialized: "19196243916@c.us" } };
+  assert.equal(extractResolvedPhone(contact), "19196243916");
+});
+
+test("extractResolvedPhone returns empty when WhatsApp never resolved past the lid (never guesses)", () => {
+  const contact = { id: { _serialized: "134492773699746@lid" } };
+  assert.equal(extractResolvedPhone(contact), "");
+});
+
+test("extractResolvedPhone returns empty for a missing/null contact", () => {
+  assert.equal(extractResolvedPhone(null), "");
+  assert.equal(extractResolvedPhone(undefined), "");
+  assert.equal(extractResolvedPhone({}), "");
+});
+
+// --- Bounded send retry for the "no chat created" false negative --------
+
+function fakeReadyClient(sendMessageResults) {
+  let callCount = 0;
+  return {
+    calls: [],
+    async sendMessage(contactId, content, options) {
+      const result = sendMessageResults[Math.min(callCount, sendMessageResults.length - 1)];
+      callCount += 1;
+      this.calls.push({ contactId, content, options });
+      return result;
+    },
+  };
+}
+
+test("sendMessageWithChatRetry returns immediately on a first-try success", async () => {
+  const sentMessage = { id: { _serialized: "abc123" } };
+  const readyClient = fakeReadyClient([sentMessage]);
+  const result = await sendMessageWithChatRetry(readyClient, "19196243916@c.us", null, "hello");
+  assert.equal(result, sentMessage);
+  assert.equal(readyClient.calls.length, 1);
+});
+
+test("sendMessageWithChatRetry retries a no-chat-created failure and succeeds on the next attempt", async () => {
+  const sentMessage = { id: { _serialized: "abc123" } };
+  // First attempt returns nothing (the "no chat created" false negative),
+  // second attempt succeeds.
+  const readyClient = fakeReadyClient([undefined, sentMessage]);
+  const result = await sendMessageWithChatRetry(readyClient, "19196243916@c.us", null, "hello");
+  assert.equal(result, sentMessage);
+  assert.equal(readyClient.calls.length, 2);
+});
+
+test("sendMessageWithChatRetry gives up after a bounded number of attempts, not indefinitely", async () => {
+  // Every attempt returns nothing - the retry must still stop.
+  const readyClient = fakeReadyClient([undefined]);
+  const result = await sendMessageWithChatRetry(readyClient, "19196243916@c.us", null, "hello");
+  assert.equal(result, undefined);
+  // Default WHATSAPP_CONTACT_SEND_RETRY_ATTEMPTS is 2 - exactly that many
+  // calls, no more.
+  assert.equal(readyClient.calls.length, 2);
+});
+
+test("sendMessageWithChatRetry passes media as caption when provided", async () => {
+  const sentMessage = { id: { _serialized: "abc123" } };
+  const readyClient = fakeReadyClient([sentMessage]);
+  const media = { mimetype: "image/png" };
+  await sendMessageWithChatRetry(readyClient, "19196243916@c.us", media, "caption text");
+  assert.equal(readyClient.calls[0].content, media);
+  assert.deepEqual(readyClient.calls[0].options, { caption: "caption text" });
+});
+
+test("SEND_ATTEMPTED_UNCONFIRMED is exported for callers to compare error.state against", () => {
+  assert.equal(whatsappClient.SEND_ATTEMPTED_UNCONFIRMED, "SEND_ATTEMPTED_UNCONFIRMED");
 });
