@@ -4,18 +4,28 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
-// Must be set before whatsappClient is required - CONTACT_SEND_RETRY_DELAY_MS
-// is read once at module load time. Keeps the retry tests below fast instead
-// of actually waiting out the production 3s delay.
+// Must be set before whatsappClient is required - both are read once at
+// module load time. WHATSAPP_CONTACT_SEND_RETRY_DELAY_MS keeps the retry
+// tests below fast instead of actually waiting out the production 3s delay.
+// WHATSAPP_CONTACT_SEND_RETRY_ATTEMPTS is pinned to 2 here so the
+// multi-attempt retry tests below can exercise a real retry - the
+// production default is intentionally 1 (see whatsappClient.js), since
+// every attempt is a real WhatsApp send and multiplying that by attempts
+// per contact id candidate is what caused a single click to produce
+// multiple real sends in production.
 process.env.WHATSAPP_CONTACT_SEND_RETRY_DELAY_MS = "10";
+process.env.WHATSAPP_CONTACT_SEND_RETRY_ATTEMPTS = "2";
+process.env.WHATSAPP_LID_ACK_TIMEOUT_MS = "20";
 
 const whatsappClient = require("../src/whatsappClient");
+const { sendContactMessage } = whatsappClient;
 const {
   isProcessAlive,
   removeStaleSingletonLocks,
   isLidId,
   extractResolvedPhone,
   normalizeMessageContact,
+  __setTestClient,
   sendMessageWithChatRetry,
 } = whatsappClient._internal;
 
@@ -207,8 +217,8 @@ test("sendMessageWithChatRetry gives up after a bounded number of attempts, not 
   const readyClient = fakeReadyClient([undefined]);
   const result = await sendMessageWithChatRetry(readyClient, "19196243916@c.us", null, "hello");
   assert.equal(result, undefined);
-  // Default WHATSAPP_CONTACT_SEND_RETRY_ATTEMPTS is 2 - exactly that many
-  // calls, no more.
+  // WHATSAPP_CONTACT_SEND_RETRY_ATTEMPTS is pinned to 2 for this test file
+  // (see the top of this file) - exactly that many calls, no more.
   assert.equal(readyClient.calls.length, 2);
 });
 
@@ -223,4 +233,65 @@ test("sendMessageWithChatRetry passes media as caption when provided", async () 
 
 test("SEND_ATTEMPTED_UNCONFIRMED is exported for callers to compare error.state against", () => {
   assert.equal(whatsappClient.SEND_ATTEMPTED_UNCONFIRMED, "SEND_ATTEMPTED_UNCONFIRMED");
+});
+
+// --- sendContactMessage: stop after a real dispatch, never send twice ----
+//
+// Root cause of the 2026-08-18 incident: for each of up to 2 contact id
+// candidates (phone-based, then @lid), sendMessage() was retried up to
+// CONTACT_SEND_RETRY_ATTEMPTS times, AND on an unacknowledged-but-dispatched
+// message the code moved on to try the next candidate id too - up to 4 real
+// client.sendMessage() calls for one logical message. These tests prove a
+// candidate id that actually got as far as creating a message object (a
+// rawId) stops the whole attempt instead of trying another candidate id.
+
+function fakeReadyClientWithLid(phoneResult, lidResult) {
+  const calls = [];
+  return {
+    calls,
+    async getNumberId(digits) {
+      return { _serialized: `${digits}00@lid` };
+    },
+    async sendMessage(contactId) {
+      calls.push(contactId);
+      return contactId.endsWith("@lid") ? lidResult : phoneResult;
+    },
+    on() {},
+    off() {},
+  };
+}
+
+test("sendContactMessage stops after a dispatched-but-unacknowledged message; never tries a second candidate id", async () => {
+  // Phone candidate: sendMessage() returns a real message object with a raw
+  // id (WhatsApp's client actually created and dispatched it) but no
+  // _serialized id, and no message_ack ever arrives within the timeout.
+  const phoneResult = { id: { id: "3EB0RAWID", _serialized: "" } };
+  const lidResult = { id: { _serialized: "should-never-be-reached" } };
+  const readyClient = fakeReadyClientWithLid(phoneResult, lidResult);
+  __setTestClient(readyClient, whatsappClient._STATUS.READY);
+
+  await assert.rejects(
+    () => sendContactMessage({ contact: "+19196243916", message: "hello" }),
+    (error) => {
+      assert.equal(error.state, "SEND_ATTEMPTED_UNCONFIRMED");
+      return true;
+    }
+  );
+
+  assert.equal(readyClient.calls.length, 1, "must not try the @lid candidate after the phone candidate already dispatched a real message");
+  assert.equal(readyClient.calls[0], "19196243916@c.us");
+});
+
+test("sendContactMessage still tries the next candidate id when the first produced no message at all", async () => {
+  // Phone candidate: sendMessage() returns nothing at all, every attempt
+  // (the genuine "no chat could be created" case) - trying the @lid
+  // candidate afterward is still safe here since nothing was ever dispatched.
+  const lidResult = { id: { _serialized: "abc123" } };
+  const readyClient = fakeReadyClientWithLid(undefined, lidResult);
+  __setTestClient(readyClient, whatsappClient._STATUS.READY);
+
+  const result = await sendContactMessage({ contact: "+19196243916", message: "hello" });
+
+  assert.equal(result.messageId, "abc123");
+  assert.equal(readyClient.calls.length, 3, "2 attempts for the phone candidate (pinned WHATSAPP_CONTACT_SEND_RETRY_ATTEMPTS=2) + 1 for the @lid candidate that succeeded");
 });
