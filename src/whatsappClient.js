@@ -35,7 +35,17 @@ const RESOLVE_CONTACT_TIMEOUT_MS = Number(process.env.WHATSAPP_RESOLVE_CONTACT_T
 // still deliver the message. Intentionally small and fixed - never retries
 // indefinitely, and does not apply to any other failure mode (an outright
 // rejection, e.g. an unauthorized or invalid contact, is not retried here).
-const CONTACT_SEND_RETRY_ATTEMPTS = Number(process.env.WHATSAPP_CONTACT_SEND_RETRY_ATTEMPTS || 2);
+//
+// Default is 1 (no internal retry beyond the first attempt) - NOT 2. Every
+// attempt here is a real client.sendMessage() call, and this bounded retry
+// is tried once per candidate contact id (see resolveContactIds() - up to
+// two ids per contact, phone-based then @lid). At 2 attempts per candidate
+// that is up to 4 real WhatsApp sends for one logical message; production
+// logs confirmed exactly that (2026-08-18, one "Send to Jawa" click ->
+// 4 sendMessage() calls, all reported as failed - any one of which may
+// have silently succeeded). 1 attempt per candidate keeps the worst case
+// at 2, still covering the original false-negative case this exists for.
+const CONTACT_SEND_RETRY_ATTEMPTS = Number(process.env.WHATSAPP_CONTACT_SEND_RETRY_ATTEMPTS || 1);
 const CONTACT_SEND_RETRY_DELAY_MS = Number(process.env.WHATSAPP_CONTACT_SEND_RETRY_DELAY_MS || 3000);
 const SEND_ATTEMPTED_UNCONFIRMED = "SEND_ATTEMPTED_UNCONFIRMED";
 
@@ -1056,10 +1066,20 @@ async function sendContactMessage({ contact, message, imageBase64, imageFilename
         sentAt: new Date().toISOString(),
       };
     }
+    // A rawId means WhatsApp's client actually created and dispatched a real
+    // outgoing message object for this candidate id - unlike the "no
+    // chat/message created" case above, something was genuinely sent here,
+    // we just have no positive ack for it within the timeout. Trying the
+    // *next* candidate id after this point would be a second real send
+    // attempt for the same message to the same person (via a different JID
+    // form), not a safe retry - this is exactly how one click produced
+    // multiple real sends in production. Stop here and report unconfirmed
+    // instead of moving on.
     logger.warn(
       { contact, contactId, rawId },
-      "No message_ack received within timeout, treating as not delivered; trying next contact id"
+      "No message_ack received within timeout; a message was dispatched but unconfirmed - not trying another contact id"
     );
+    break;
   }
 
   // Every candidate id was tried (with bounded retries for the no-chat
@@ -1100,5 +1120,13 @@ module.exports = {
     extractResolvedPhone,
     normalizeMessageContact,
     sendMessageWithChatRetry,
+    // Test-only hook so sendContactMessage()'s full candidate-id loop
+    // (including the "stop after a real dispatch" behavior) can be
+    // exercised against a fake client, without needing a real WhatsApp
+    // session. Never called outside tests.
+    __setTestClient(fakeClient, status) {
+      client = fakeClient;
+      whatsappStatus = status || STATUS.READY;
+    },
   },
 };
