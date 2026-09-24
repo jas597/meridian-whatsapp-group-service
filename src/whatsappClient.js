@@ -309,6 +309,17 @@ function markDisconnected(reason) {
   initializing = false;
   stopHealthCheck();
   logger.warn({ reason }, "WhatsApp marked disconnected");
+
+  // A runtime disconnect used to leave the service permanently stuck in
+  // DISCONNECTED. Startup failures already use initializeWithRetry(), but a
+  // later health-check/disconnected event never re-entered that retry loop.
+  // Schedule the same bounded reconnect loop here so Publish to Jawa can
+  // recover automatically without a Render restart or manual /qr visit.
+  //
+  // scheduleRetry() de-duplicates pending timers, so multiple signals from
+  // the same disconnect (health check + disconnected event) cannot create
+  // overlapping Chromium/session initializations.
+  scheduleRetry();
 }
 
 function withTimeout(promise, ms, label) {
@@ -1058,6 +1069,11 @@ module.exports = {
     extractResolvedPhone,
     normalizeMessageContact,
     resolveContactIds,
+    markDisconnected,
+    __hasRetryTimer() {
+      return Boolean(retryTimer);
+    },
+    __clearRetryTimer: clearRetryTimer,
     // Test-only hook so sendContactMessage()'s real send logic (including
     // the "exactly one client.sendMessage() call" guarantee) can be
     // exercised against a fake client, without needing a real WhatsApp

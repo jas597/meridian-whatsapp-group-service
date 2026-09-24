@@ -39,6 +39,22 @@ try {
   symlinksSupported = false;
 }
 
+test("runtime disconnect schedules an automatic reconnect retry", () => {
+  const readyClient = {
+    async destroy() {},
+  };
+  whatsappClient._internal.__setTestClient(readyClient, whatsappClient._STATUS.READY);
+
+  whatsappClient._internal.markDisconnected("unit test");
+
+  assert.equal(whatsappClient.getStatus(), whatsappClient._STATUS.DISCONNECTED);
+  assert.equal(whatsappClient._internal.__hasRetryTimer(), true);
+
+  // Prevent the scheduled retry from creating a real WhatsApp client after
+  // this unit test finishes.
+  whatsappClient._internal.__clearRetryTimer();
+});
+
 test("isProcessAlive returns true for the current process", () => {
   assert.equal(isProcessAlive(process.pid), true);
 });
