@@ -1,5 +1,6 @@
 const express = require("express");
 const rateLimit = require("express-rate-limit");
+const { requireBearerSecret } = require("../middleware/auth");
 
 function createStatusRouter({ whatsappClient }) {
   const router = express.Router();
@@ -22,6 +23,11 @@ function createStatusRouter({ whatsappClient }) {
       whatsappStatus: whatsappClient.getStatus(),
       timestamp: new Date().toISOString(),
     });
+  });
+
+  router.get("/sender-status", requireBearerSecret, (req, res) => {
+    res.set("Cache-Control", "no-store");
+    return res.json({ success: true, whatsapp: whatsappClient.getSenderIdentity() });
   });
 
   router.get("/qr", qrLimiter, async (req, res) => {
@@ -64,8 +70,8 @@ function createStatusRouter({ whatsappClient }) {
 </head>
 <body>
   <main>
-    <h1>Meridian WhatsApp Login</h1>
-    <p>Scan this QR code from the Meridian WhatsApp account. Do not share this page publicly.</p>
+    <h1>Floor-plan WhatsApp Login</h1>
+    <p>Use WhatsApp Business on +1 336-218-6470. Open Settings → Linked devices → Link a device, then scan this code. Do not share this page publicly.</p>
     ${qrMarkup}
     <p>Status: <strong>${status}</strong></p>
   </main>

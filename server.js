@@ -7,6 +7,7 @@ const logger = require("./src/utils/logger");
 const whatsappClient = require("./src/whatsappClient");
 const cloudApiClient = require("./src/cloudApiClient");
 const { createMessageRouter } = require("./src/routes/messageRoutes");
+const { createEmailRouter } = require("./src/routes/emailRoutes");
 const { createStatusRouter } = require("./src/routes/statusRoutes");
 const { createCloudWebhookRouter } = require("./src/routes/cloudWebhookRoutes");
 const { createCloudMessageRouter } = require("./src/routes/cloudMessageRoutes");
@@ -40,6 +41,7 @@ function createApp(options = {}) {
 
   app.use("/", createStatusRouter({ whatsappClient: client }));
   app.use("/", createMessageRouter({ whatsappClient: client }));
+  app.use("/", createEmailRouter(options.emailOptions));
   app.use("/", createCloudWebhookRouter({ appendInboundMessage: client.appendInboundMessage }));
   app.use("/", createCloudMessageRouter({ cloudApiClient: cloudClient }));
   app.use(notFoundHandler);

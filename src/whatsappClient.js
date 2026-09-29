@@ -44,7 +44,7 @@ const SEND_ATTEMPTED_UNCONFIRMED = "SEND_ATTEMPTED_UNCONFIRMED";
 // Must match the clientId passed to LocalAuth in createClient() below - kept
 // as one constant so the profile-lock cleanup can never drift out of sync
 // with the directory whatsapp-web.js actually launches Chromium in.
-const WHATSAPP_CLIENT_ID = "meridian-staff";
+const WHATSAPP_CLIENT_ID = process.env.WHATSAPP_CLIENT_ID || "meridian-staff";
 
 // Chromium creates these directly in the profile (userDataDir) root to stop
 // two instances from sharing one profile. They are removed automatically on
@@ -180,6 +180,16 @@ function getStatus() {
   return whatsappStatus;
 }
 
+function getSenderIdentity() {
+  const expected = String(process.env.WHATSAPP_EXPECTED_SENDER || "").replace(/\D/g, "");
+  const wid = client?.info?.wid;
+  // A @lid identifier is not a phone number. Fail closed if WhatsApp has
+  // not exposed a phone-based identity for the signed-in account.
+  const phone = wid && ["c.us", "s.whatsapp.net"].includes(wid.server)
+    ? String(wid.user || "").replace(/\D/g, "") : "";
+  return { expected, phone, matches: Boolean(expected && phone === expected), status: whatsappStatus };
+}
+
 function getQrDataUrl() {
   return currentQrDataUrl;
 }
@@ -267,6 +277,13 @@ function requireReadyClient() {
   if (!client || whatsappStatus !== STATUS.READY) {
     const error = new Error("WhatsApp is not ready.");
     error.statusCode = 503;
+    throw error;
+  }
+  const identity = getSenderIdentity();
+  if (identity.expected && !identity.matches) {
+    const error = new Error("The linked WhatsApp account does not match the configured floor-plan sender.");
+    error.statusCode = 409;
+    error.state = "SENDER_MISMATCH";
     throw error;
   }
   return client;
@@ -1050,6 +1067,7 @@ module.exports = {
   initializeWhatsApp,
   initializeWithRetry,
   getStatus,
+  getSenderIdentity,
   getQrDataUrl,
   listGroups,
   listInboundMessages,

@@ -1,24 +1,36 @@
+# Proposed dedicated service; applying this Blueprint starts paid billing.
+# Standard matches the existing Chromium-backed staff service's memory size.
 services:
   - type: web
-    name: meridian-whatsapp-group-service
-    env: docker
-    plan: starter
+    name: meridian-floor-plan-messaging
+    runtime: docker
+    repo: https://github.com/jas597/meridian-whatsapp-group-service
+    branch: floor-plan-messaging
+    region: oregon
+    plan: standard
     numInstances: 1
+    autoDeployTrigger: "off"
     healthCheckPath: /health
     disk:
-      name: whatsapp-session
+      name: floor-plan-session
       mountPath: /var/data
       sizeGB: 1
     envVars:
       - key: PORT
-        value: 3000
-      - key: ALLOWED_GROUP_NAME
-        value: Meridian Staff
-      - key: WHATSAPP_SESSION_PATH
-        value: /var/data/whatsapp-session
+        value: "3000"
       - key: NODE_ENV
         value: production
+      - key: WHATSAPP_CLIENT_ID
+        value: meridian-floor-plan
+      - key: WHATSAPP_EXPECTED_SENDER
+        value: "13362186470"
+      - key: WHATSAPP_SESSION_PATH
+        value: /var/data/floor-plan-whatsapp
+      - key: EMAIL_RECEIPTS_PATH
+        value: /var/data/email-receipts
+      - key: GMAIL_USER
+        value: info@meridianconvention.com
       - key: WHATSAPP_WEBHOOK_SECRET
-        sync: false
+        generateValue: true
       - key: QR_PAGE_SECRET
-        sync: false
+        generateValue: true

@@ -1,12 +1,12 @@
 {
   "name": "meridian-whatsapp-group-service",
   "version": "1.0.0",
-  "description": "Meridian WhatsApp group messaging service for staff schedule broadcasts.",
+  "description": "Dedicated Meridian floor-plan WhatsApp and Gmail notification service",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
     "test": "node --test",
-    "check": "node --check server.js && node --check src/whatsappClient.js && node --check src/cloudApiClient.js && node --check src/routes/messageRoutes.js && node --check src/routes/statusRoutes.js && node --check src/routes/cloudWebhookRoutes.js && node --check src/routes/cloudMessageRoutes.js && node --check src/middleware/auth.js && node --check src/middleware/errorHandler.js"
+    "check": "node --check server.js && node --check src/whatsappClient.js && node --check src/cloudApiClient.js && node --check src/routes/messageRoutes.js && node --check src/routes/statusRoutes.js && node --check src/routes/cloudWebhookRoutes.js && node --check src/routes/cloudMessageRoutes.js && node --check src/middleware/auth.js && node --check src/middleware/errorHandler.js && node --check src/gmailClient.js && node --check src/routes/emailRoutes.js"
   },
   "engines": {
     "node": ">=20"
@@ -16,6 +16,7 @@
     "express": "^4.19.2",
     "express-rate-limit": "^7.4.1",
     "helmet": "^7.1.0",
+    "nodemailer": "^10.0.12",
     "pino": "^9.5.0",
     "qrcode": "^1.5.4",
     "whatsapp-web.js": "^1.34.7"

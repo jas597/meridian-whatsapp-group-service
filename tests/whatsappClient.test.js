@@ -128,7 +128,9 @@ test("removeStaleSingletonLocks leaves a lock in place when it points at a live 
     const removed = removeStaleSingletonLocks(dir);
 
     assert.equal(removed, false);
-    assert.equal(fs.existsSync(path.join(dir, "SingletonLock")), true);
+    // Chromium's lock target is a pid label, not an existing file. Inspect
+    // the link itself; existsSync follows it and reports a dangling target.
+    assert.equal(fs.lstatSync(path.join(dir, "SingletonLock")).isSymbolicLink(), true);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
