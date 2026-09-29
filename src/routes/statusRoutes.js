@@ -19,7 +19,7 @@ function createStatusRouter({ whatsappClient }) {
   router.get("/health", (req, res) => {
     return res.json({
       success: true,
-      service: "meridian-whatsapp-group-service",
+      service: "meridian-floor-plan-messaging",
       whatsappStatus: whatsappClient.getStatus(),
       timestamp: new Date().toISOString(),
     });
@@ -28,6 +28,14 @@ function createStatusRouter({ whatsappClient }) {
   router.get("/sender-status", requireBearerSecret, (req, res) => {
     res.set("Cache-Control", "no-store");
     return res.json({ success: true, whatsapp: whatsappClient.getSenderIdentity() });
+  });
+
+  router.get("/pairing-code", requireBearerSecret, qrLimiter, async (req, res) => {
+    if (["starting", "disconnected"].includes(whatsappClient.getStatus())) {
+      try { await whatsappClient.initializeWhatsApp(); } catch { /* Report current state below. */ }
+    }
+    res.set("Cache-Control", "no-store");
+    return res.json({ state: whatsappClient.getStatus(), qrDataUrl: whatsappClient.getQrDataUrl() || null });
   });
 
   router.get("/qr", qrLimiter, async (req, res) => {

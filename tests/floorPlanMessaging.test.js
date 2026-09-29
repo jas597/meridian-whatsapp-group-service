@@ -87,6 +87,7 @@ test('WhatsApp blocks wrong or unknown senders before dispatch', async () => {
   assert.equal(sends, 1);
   const app = express().use(createStatusRouter({ whatsappClient: whatsapp }));
   assert.equal((await request(app).get('/sender-status')).status, 401);
+  assert.equal((await request(app).get('/pairing-code')).status, 401);
   assert.equal((await auth(request(app).get('/sender-status'))).body.whatsapp.phone, '13362186470');
  } finally { delete process.env.WHATSAPP_EXPECTED_SENDER; }
 });
