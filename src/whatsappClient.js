@@ -662,6 +662,41 @@ async function initializeInternal() {
     currentQrDataUrl = "";
     logger.info("WhatsApp client ready");
     startHealthCheck();
+
+    if (String(process.env.SEND_ZOOM_REPORT_TEST_ON_READY || "").trim().toLowerCase() === "true") {
+      const testContact = String(process.env.ZOOM_REPORT_TEST_CONTACT || "").trim();
+      const markerPath = path.join(sessionPath(), "zoom-report-test-20260930.attempted");
+      if (testContact && !fs.existsSync(markerPath)) {
+        try {
+          fs.writeFileSync(markerPath, new Date().toISOString(), "utf8");
+          const result = await sendContactMessage({
+            contact: testContact,
+            message: [
+              "TEST - MERIDIAN CONVENTION CENTER",
+              "",
+              "Zoom Staff Daily Report - TEST ONLY",
+              "",
+              "This is a test of the automatic end-of-day Zoom report system.",
+              "Work window: 9:30 AM ET to actual meeting end",
+              "Flexible break allowance: 1 hour",
+              "",
+              "Staff tracked: Jas, Kim T, Maria, Sasi, Padma, OFFICE, Kevin.",
+              "",
+              "No real attendance or camera figures are included in this test."
+            ].join("\n")
+          });
+          logger.info(
+            { contact: testContact, messageId: result.messageId },
+            "Zoom report test message sent"
+          );
+        } catch (error) {
+          logger.error(
+            { contact: testContact, error: error.message, state: error.state },
+            "Zoom report test message failed"
+          );
+        }
+      }
+    }
   });
 
   // change_state reflects whatsapp-web.js's own internal WAState (from the
