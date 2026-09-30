@@ -671,7 +671,8 @@ async function initializeInternal() {
     }
     whatsappStatus = STATUS.READY;
     currentQrDataUrl = "";
-    logger.info("WhatsApp client ready");
+    const ownWid = client && client.info && client.info.wid && client.info.wid.user ? String(client.info.wid.user) : "";
+    logger.info({ ownNumber: ownWid }, "WhatsApp client ready");
     startHealthCheck();
   });
 
