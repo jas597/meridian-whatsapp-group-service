@@ -872,7 +872,7 @@ function buildImageMedia(imageBase64, imageFilename = "staff-schedule.png") {
   return new MessageMedia("image/png", cleanData, imageFilename || "staff-schedule.png");
 }
 
-async function sendGroupMessage({ group, message, imageBase64, imageFilename }) {
+async function sendGroupMessage({ group, message, imageBase64, imageFilename, singleAttempt=false, resolvedGroupId }) {
   const readyClient = requireReadyClient();
 
   const allowed = allowedGroupName();
@@ -882,7 +882,7 @@ async function sendGroupMessage({ group, message, imageBase64, imageFilename }) 
     throw error;
   }
 
-  let groupId = await findGroupId();
+  let groupId = singleAttempt ? resolvedGroupId : await findGroupId();
   if (!groupId) {
     const error = new Error("WhatsApp group not found.");
     error.statusCode = 404;
@@ -895,12 +895,14 @@ async function sendGroupMessage({ group, message, imageBase64, imageFilename }) 
       ? await readyClient.sendMessage(groupId, media, { caption: message })
       : await readyClient.sendMessage(groupId, message);
     const messageId = sentMessage && sentMessage.id ? sentMessage.id._serialized : "";
+    if(singleAttempt && !messageId)throw new Error("WhatsApp send result is uncertain.");
     logger.info({ group, groupId, messageId }, "WhatsApp group message sent");
     return {
       messageId,
       sentAt: new Date().toISOString(),
     };
   } catch (firstError) {
+    if(singleAttempt){const error=new Error("WhatsApp send result is uncertain; check the group before repeating.");error.statusCode=502;error.state="SEND_ATTEMPTED_UNCONFIRMED";throw error;}
     logger.warn({ error: firstError.message, stack: firstError.stack, group }, "Send failed; refreshing group cache");
     groupId = await findGroupId({ forceRefresh: true });
     if (!groupId) {

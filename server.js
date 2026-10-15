@@ -9,6 +9,7 @@ const cloudApiClient = require("./src/cloudApiClient");
 const gmail = require("./src/gmailClient");
 const { createMessageRouter } = require("./src/routes/messageRoutes");
 const { createEmailRouter } = require("./src/routes/emailRoutes");
+const { createClientReviewRouter } = require("./src/routes/clientReviewRoutes");
 const { createStatusRouter } = require("./src/routes/statusRoutes");
 const { createCloudWebhookRouter } = require("./src/routes/cloudWebhookRoutes");
 const { createCloudMessageRouter } = require("./src/routes/cloudMessageRoutes");
@@ -43,6 +44,7 @@ function createApp(options = {}) {
   app.use("/", createStatusRouter({ whatsappClient: client }));
   app.use("/", createMessageRouter({ whatsappClient: client }));
   app.use("/", createEmailRouter(options.emailOptions));
+  app.use("/", createClientReviewRouter({ whatsappClient: client }));
   app.use("/", createCloudWebhookRouter({ appendInboundMessage: client.appendInboundMessage }));
   app.use("/", createCloudMessageRouter({ cloudApiClient: cloudClient }));
   app.use(notFoundHandler);
