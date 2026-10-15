@@ -5,6 +5,7 @@ const path = require("node:path");
 const crypto = require("node:crypto");
 const { requireBearerSecret } = require("../middleware/auth");
 const gmail = require("../gmailClient");
+const logger = require("../utils/logger");
 
 // Single Render instance, persistent disk. Save a claim BEFORE sending, so
 // concurrent requests and restarts cannot silently send the same email twice.
@@ -15,13 +16,8 @@ function createEmailRouter({ env = process.env, makeTransport = gmail.createTran
     res.set("Cache-Control", "no-store").json(gmail.setup(env));
   });
   router.post("/verify-email", requireBearerSecret, limiter, async (_req, res) => {
-    if (!gmail.setup(env).configured) return res.status(503).json({ success: false, ...gmail.setup(env) });
-    try {
-      await makeTransport(env).verify();
-      return res.json({ success: true, sender: gmail.SENDER, authenticated: true });
-    } catch {
-      return res.status(503).json({ success: false, sender: gmail.SENDER, authenticated: false });
-    }
+    const result = await gmail.verifyConnection(env, makeTransport);
+    return res.status(result.authenticated ? 200 : 503).json({ success: result.authenticated, ...result });
   });
   router.post("/send-email", requireBearerSecret, limiter, async (req, res) => {
     const { to, subject, text } = req.body || {};
@@ -68,7 +64,8 @@ function createEmailRouter({ env = process.env, makeTransport = gmail.createTran
     } catch (error) {
       // An explicit SMTP rejection is safe to report as failed. Timeouts and
       // dropped connections may happen after delivery: never retry them here.
-      if (error.code === "EAUTH" || Number(error.responseCode) >= 400) outcome = { statusCode: 422, body: { success: false, state: "REJECTED", error: "Gmail rejected this send. Check the account configuration or recipient." } };
+      logger.warn(gmail.failureDetails(error), "Floor-plan email send failed");
+      if (error.code === "EAUTH" || Number(error.responseCode) >= 400) outcome = { statusCode: 422, body: { success: false, state: "REJECTED", error: "Gmail rejected this send. Check the account configuration or recipient.", ...gmail.failureDetails(error) } };
     }
     try {
       const temp = file + ".tmp";

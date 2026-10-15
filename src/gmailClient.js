@@ -30,4 +30,29 @@ function createTransport(env = process.env) {
   });
 }
 
-module.exports = { SENDER, setup, createTransport };
+// Only expose protocol codes. SMTP messages can contain account data or secrets.
+function failureDetails(error) {
+  const code = /^[A-Z0-9_]{1,40}$/.test(error?.code || "") ? error.code : "EMAIL_ERROR";
+  const smtpCode = Number(error?.responseCode);
+  const command = String(error?.command || "").split(" ")[0];
+  const enhancedCode = String(error?.response || "").match(/\b[245]\.\d\.\d{1,3}\b/)?.[0];
+  return {
+    errorCode: code,
+    ...(Number.isInteger(smtpCode) && smtpCode >= 400 && smtpCode <= 599 ? { smtpCode } : {}),
+    ...(["AUTH", "CONN", "EHLO", "HELO", "MAIL", "RCPT", "DATA", "STARTTLS"].includes(command) ? { command } : {}),
+    ...(enhancedCode ? { enhancedCode } : {}),
+  };
+}
+
+async function verifyConnection(env = process.env, makeTransport = createTransport) {
+  const state = setup(env);
+  if (!state.configured) return { ...state, authenticated: false, errorCode: "EMAIL_NOT_CONFIGURED" };
+  try {
+    await makeTransport(env).verify();
+    return { ...state, authenticated: true };
+  } catch (error) {
+    return { ...state, authenticated: false, ...failureDetails(error) };
+  }
+}
+
+module.exports = { SENDER, setup, createTransport, failureDetails, verifyConnection };

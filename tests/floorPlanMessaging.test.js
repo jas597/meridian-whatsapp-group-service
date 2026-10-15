@@ -48,6 +48,29 @@ test('uncertain sends stay unknown and are never automatically repeated', async 
  for (let i = 0; i < 2; i++) assert.equal((await send()).body.state, 'SEND_ATTEMPTED_UNCONFIRMED');
  assert.equal(sends, 1);
 });
+test('SMTP authentication diagnostics expose codes only and never send mail', async () => {
+ let sends = 0;
+ const env = { GMAIL_USER: gmail.SENDER, GMAIL_APP_PASSWORD: 'keep-this-secret' };
+ const transport = () => ({
+  verify: async () => { throw Object.assign(new Error('secret raw SMTP message'), { code: 'EAUTH', responseCode: 535, command: 'AUTH PLAIN secret-auth-data', response: '535-5.7.8 secret account response' }); },
+  sendMail: async () => { sends++; },
+ });
+ const result = await gmail.verifyConnection(env, transport);
+ assert.deepEqual(result, { sender: gmail.SENDER, configured: true, authenticated: false, errorCode: 'EAUTH', smtpCode: 535, command: 'AUTH', enhancedCode: '5.7.8' });
+ assert.equal(sends, 0);
+ assert(!JSON.stringify(result).includes('secret'));
+});
+test('rejected Gmail sends retain their diagnostic and are not repeated with the same key', async t => {
+ let sends = 0;
+ const f = fixture(t, async () => { sends++; throw Object.assign(new Error('private SMTP rejection'), { code: 'EAUTH', responseCode: 535, command: 'AUTH PLAIN private' }); });
+ const send = () => auth(request(f.build()).post('/send-email')).set('X-Idempotency-Key', 'rejected-auth').send(payload);
+ for (let i = 0; i < 2; i++) {
+  const r = await send();
+  assert.equal(r.status, 422); assert.equal(r.body.state, 'REJECTED'); assert.equal(r.body.errorCode, 'EAUTH'); assert.equal(r.body.smtpCode, 535);
+  assert(!JSON.stringify(r.body).includes('private'));
+ }
+ assert.equal(sends, 1);
+});
 test('concurrent duplicates do not dispatch a second email', async t => {
  let release, started;
  const startedPromise = new Promise(resolve => { started = resolve; });

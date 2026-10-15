@@ -6,6 +6,7 @@ const helmet = require("helmet");
 const logger = require("./src/utils/logger");
 const whatsappClient = require("./src/whatsappClient");
 const cloudApiClient = require("./src/cloudApiClient");
+const gmail = require("./src/gmailClient");
 const { createMessageRouter } = require("./src/routes/messageRoutes");
 const { createEmailRouter } = require("./src/routes/emailRoutes");
 const { createStatusRouter } = require("./src/routes/statusRoutes");
@@ -56,6 +57,11 @@ async function start() {
 
   app.listen(port, "0.0.0.0", async () => {
     logger.info({ port }, "meridian-whatsapp-group-service started");
+
+    // Verify authentication once at startup; this never sends an email.
+    void gmail.verifyConnection().then(result => {
+      logger[result.authenticated ? "info" : "warn"](result, "Floor-plan Gmail connection check");
+    });
 
     logger.info("Initializing WhatsApp client");
     // initializeWithRetry() never throws - a failed attempt schedules its
