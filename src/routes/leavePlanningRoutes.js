@@ -3,6 +3,7 @@ const rateLimit=require('express-rate-limit');
 const fs=require('node:fs');
 const path=require('node:path');
 const crypto=require('node:crypto');
+const logger=require('../utils/logger');
 const EXPECTED_SENDER='13362186470';
 const hash=value=>crypto.createHash('sha256').update(value).digest('hex');
 function createLeavePlanningRouter({whatsappClient,env=process.env}){
@@ -63,7 +64,7 @@ function createLeavePlanningRouter({whatsappClient,env=process.env}){
    }catch{}
    const sent=await whatsappClient.sendContactMessage({contact:sendTarget,message,imageBase64:imageBase64||'',imageFilename:imageFilename||'meridian-daily-brief.jpg'});
    if(sent.messageId)outcome={statusCode:200,body:{success:true,messageId:sent.messageId,sentAt:sent.sentAt}};
-  }catch{/* Any exception after dispatch may have sent. Never auto-repeat as a new message. */}
+  }catch(error){logger.error({error:error?.message,stack:error?.stack,contact:sendTarget},'Leave-planning direct contact send failed');/* Any exception after dispatch may have sent. Never auto-repeat as a new message. */}
   try{save(file+'.tmp',{fingerprint,...outcome});fs.renameSync(file+'.tmp',file);}catch{}
   return res.status(outcome.statusCode).json(outcome.body);
  });
