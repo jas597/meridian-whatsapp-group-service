@@ -39,6 +39,29 @@ function createLeavePlanningRouter({whatsappClient,env=process.env}){
    return res.json({group});
   }catch{return res.status(503).json({error:'The group could not be saved.'});}
  });
+ router.post('/leave-planning/send-contact',async(req,res)=>{
+  const key=String(req.get('x-idempotency-key')||''),{contact,message,imageBase64,imageFilename}=req.body||{};
+  const blocked=error=>res.status(409).json({success:false,state:'NOT_ATTEMPTED',error});
+  if(!/^brief:[a-zA-Z0-9_:.-]{1,180}$/.test(key)||typeof contact!=='string'||!contact.trim()||typeof message!=='string'||!message.trim()||message.length>10000)return blocked('Invalid internal brief notification.');
+  if(imageBase64!=null&&typeof imageBase64!=='string')return blocked('Invalid brief image.');
+  const file=path.join(dir,hash(key)+'.json'),fingerprint=hash(JSON.stringify({contact,message,imageBase64:imageBase64||'',imageFilename:imageFilename||''}));
+  const unknown={statusCode:502,body:{success:false,state:'SEND_ATTEMPTED_UNCONFIRMED'}};
+  try{const old=JSON.parse(fs.readFileSync(file,'utf8'));if(old.fingerprint!==fingerprint)return blocked('Notification key conflict.');return res.status(old.statusCode).json({...old.body,cached:true});}
+  catch(e){if(e.code!=='ENOENT')return res.status(502).json(unknown.body);}
+  if(!identity().ready)return blocked('Reconnect Meridian business WhatsApp.');
+  try{
+   save(file,{fingerprint,...unknown},'wx');
+   const fd=fs.openSync(dir,'r');try{fs.fsyncSync(fd);}finally{fs.closeSync(fd);}
+  }catch(e){if(e.code==='EEXIST')return res.status(502).json(unknown.body);return blocked('Brief notification storage is unavailable.');}
+  let outcome=unknown;
+  try{
+   const sent=await whatsappClient.sendContactMessage({contact:contact.trim(),message,imageBase64:imageBase64||'',imageFilename:imageFilename||'meridian-daily-brief.jpg'});
+   if(sent.messageId)outcome={statusCode:200,body:{success:true,messageId:sent.messageId,sentAt:sent.sentAt}};
+  }catch{/* Any exception after dispatch may have sent. Never auto-repeat as a new message. */}
+  try{save(file+'.tmp',{fingerprint,...outcome});fs.renameSync(file+'.tmp',file);}catch{}
+  return res.status(outcome.statusCode).json(outcome.body);
+ });
+
  router.post('/leave-planning/send',async(req,res)=>{
   const key=String(req.get('x-idempotency-key')||''),{groupId,message}=req.body||{};
   const blocked=error=>res.status(409).json({success:false,state:'NOT_ATTEMPTED',error});
