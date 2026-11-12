@@ -55,7 +55,13 @@ function createLeavePlanningRouter({whatsappClient,env=process.env}){
   }catch(e){if(e.code==='EEXIST')return res.status(502).json(unknown.body);return blocked('Brief notification storage is unavailable.');}
   let outcome=unknown;
   try{
-   const sent=await whatsappClient.sendContactMessage({contact:contact.trim(),message,imageBase64:imageBase64||'',imageFilename:imageFilename||'meridian-daily-brief.jpg'});
+   let sendTarget=contact.trim();
+   try{
+    const prior=whatsappClient.listInboundMessages({contact:sendTarget,limit:500})||[];
+    const verified=prior.find(row=>row&&row.lid&&row.resolvedPhone);
+    if(verified&&verified.lid)sendTarget=verified.lid;
+   }catch{}
+   const sent=await whatsappClient.sendContactMessage({contact:sendTarget,message,imageBase64:imageBase64||'',imageFilename:imageFilename||'meridian-daily-brief.jpg'});
    if(sent.messageId)outcome={statusCode:200,body:{success:true,messageId:sent.messageId,sentAt:sent.sentAt}};
   }catch{/* Any exception after dispatch may have sent. Never auto-repeat as a new message. */}
   try{save(file+'.tmp',{fingerprint,...outcome});fs.renameSync(file+'.tmp',file);}catch{}
