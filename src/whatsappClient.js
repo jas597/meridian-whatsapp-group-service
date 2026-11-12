@@ -911,6 +911,32 @@ async function resolveContactIds(contact) {
   if (normalized.endsWith("@c.us") || normalized.endsWith("@g.us") || normalized.endsWith("@lid")) {
     return [normalized];
   }
+
+  // getNumberId() is a lookup only; it does not send anything. Using the
+  // WID WhatsApp itself returns is safer than blindly manufacturing @c.us,
+  // while preserving the exactly-one-send guarantee below.
+  if (client && typeof client.getNumberId === "function") {
+    try {
+      const wid = await withTimeout(
+        client.getNumberId(normalized),
+        RESOLVE_CONTACT_TIMEOUT_MS,
+        "getNumberId()"
+      );
+      const serialized = wid && wid._serialized ? String(wid._serialized) : "";
+      if (serialized) {
+        return [serialized];
+      }
+      if (wid === null) {
+        return [];
+      }
+    } catch (error) {
+      logger.warn(
+        { contact: normalized, error: error.message },
+        "WhatsApp number lookup failed; using canonical phone WID"
+      );
+    }
+  }
+
   return [`${normalized}@c.us`];
 }
 
@@ -924,6 +950,83 @@ function messageSerializedId(message) {
 // version.
 function rawMessageId(message) {
   return message && message.id ? String(message.id.id || "") : "";
+}
+
+function outgoingRemoteId(message) {
+  if (!message) {
+    return "";
+  }
+  if (message.to) {
+    return String(message.to);
+  }
+  if (message.id && message.id.remote) {
+    return String(message.id.remote);
+  }
+  if (message.id && message.id._serialized) {
+    const serialized = String(message.id._serialized);
+    const parts = serialized.split("_");
+    return parts.length > 1 ? parts[parts.length - 1] : "";
+  }
+  return "";
+}
+
+function watchOutgoingMessageCreate(contactId, expectedText, timeoutMs) {
+  let handler;
+  let timer;
+  let settled = false;
+  let resolvePromise;
+
+  const cleanup = () => {
+    if (handler && client && typeof client.off === "function") {
+      client.off("message_create", handler);
+    }
+    if (timer) {
+      clearTimeout(timer);
+    }
+  };
+
+  const promise = new Promise((resolve) => {
+    resolvePromise = resolve;
+    handler = (created) => {
+      if (!created || created.fromMe !== true) {
+        return;
+      }
+      const remote = outgoingRemoteId(created);
+      if (
+        normalizeMessageContact(remote) !== normalizeMessageContact(contactId)
+        || String(created.body || "").trim() !== String(expectedText || "").trim()
+      ) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      resolve(created);
+    };
+    timer = setTimeout(() => {
+      settled = true;
+      cleanup();
+      resolve(null);
+    }, timeoutMs);
+    if (client && typeof client.on === "function") {
+      client.on("message_create", handler);
+    } else {
+      clearTimeout(timer);
+      settled = true;
+      resolve(null);
+    }
+  });
+
+  return {
+    promise,
+    cancel() {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      resolvePromise(null);
+    },
+  };
 }
 
 const MESSAGE_ACK = {
@@ -998,12 +1101,26 @@ async function sendContactMessage({ contact, message, imageBase64, imageFilename
   // delivery signal; only that (ACK_SERVER or higher) counts as real
   // confirmation.
   const media = buildImageMedia(imageBase64, imageFilename);
-  const sentMessage = media
-    ? await readyClient.sendMessage(contactId, media, { caption: message })
-    : await readyClient.sendMessage(contactId, message);
+  const createTimeoutMs = Number(process.env.WHATSAPP_MESSAGE_CREATE_TIMEOUT_MS || 12000);
+
+  // Register before sendMessage(): current whatsapp-web.js can successfully
+  // send a message but resolve sendMessage() as undefined. message_create is
+  // emitted separately for the outgoing message and lets us recover the
+  // message id without making a second real send attempt.
+  const createdWatcher = watchOutgoingMessageCreate(contactId, message, createTimeoutMs);
+  let sentMessage;
+  try {
+    sentMessage = media
+      ? await readyClient.sendMessage(contactId, media, { caption: message })
+      : await readyClient.sendMessage(contactId, message);
+  } catch (error) {
+    createdWatcher.cancel();
+    throw error;
+  }
 
   const directMessageId = messageSerializedId(sentMessage);
   if (directMessageId) {
+    createdWatcher.cancel();
     logger.info({ contact, contactId, messageId: directMessageId }, "WhatsApp contact message sent");
     return {
       messageId: directMessageId,
@@ -1012,22 +1129,34 @@ async function sendContactMessage({ contact, message, imageBase64, imageFilename
     };
   }
 
-  const rawId = rawMessageId(sentMessage);
+  let rawId = rawMessageId(sentMessage);
   if (!rawId) {
-    // sendMessage() returned nothing usable at all - internally this means
-    // WhatsApp's own findOrCreateLatestChat() could not resolve/create a
-    // chat for this id. This is genuinely uncertain, not a confirmed
-    // failure - the message may still have reached the recipient
-    // (confirmed to happen in production). Callers must not record this as
-    // a plain send failure; error.state distinguishes it so they can
-    // record a distinct "attempted but unconfirmed" status instead. There
-    // is no retry and no second candidate id here - see the comment above.
-    logger.error({ contact, contactId, reason: "no chat/message created" }, "WhatsApp contact send unconfirmed - no message object created");
+    const createdMessage = await createdWatcher.promise;
+    const createdSerializedId = messageSerializedId(createdMessage);
+    rawId = rawMessageId(createdMessage);
+    const recoveredId = createdSerializedId || rawId;
+    if (recoveredId) {
+      logger.info(
+        { contact, contactId, messageId: recoveredId },
+        "WhatsApp contact message confirmed through message_create fallback"
+      );
+      return {
+        messageId: recoveredId,
+        contactId,
+        sentAt: new Date().toISOString(),
+      };
+    }
+
+    logger.error(
+      { contact, contactId, reason: "sendMessage returned no id and no matching message_create event" },
+      "WhatsApp contact send unconfirmed"
+    );
     const error = new Error("WhatsApp could not positively confirm the contact message send.");
     error.statusCode = 502;
     error.state = SEND_ATTEMPTED_UNCONFIRMED;
     throw error;
   }
+  createdWatcher.cancel();
 
   const ackTimeoutMs = Number(process.env.WHATSAPP_LID_ACK_TIMEOUT_MS || 20000);
   const acknowledged = await waitForMessageAck(rawId, ackTimeoutMs);
