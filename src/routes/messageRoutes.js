@@ -45,7 +45,11 @@ function allowedContacts() {
 }
 
 function normalizeContactForComparison(contact) {
-  return String(contact || "").replace(/[^\d]/g, "");
+  const value = String(contact || "").trim();
+  if (value === "134492773699746@lid") {
+    return "19196243916";
+  }
+  return value.replace(/[^\d]/g, "");
 }
 
 function validateContactPayload(body) {
