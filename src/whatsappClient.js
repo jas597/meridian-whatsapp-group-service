@@ -4,6 +4,7 @@ const path = require("path");
 const { Client, LocalAuth, MessageMedia } = require("whatsapp-web.js");
 
 const logger = require("./utils/logger");
+const { readGroupDirectory } = require("./groupDirectory");
 
 const STATUS = {
   STARTING: "starting",
@@ -479,57 +480,7 @@ async function cacheGroupId() {
 }
 
 async function listGroupChats() {
-  try {
-    const chats = await client.getChats();
-    const groups = chats
-      .filter((chat) => chat.isGroup === true && chat.id && chat.id._serialized)
-      .map((chat) => ({
-        id: {
-          _serialized: chat.id._serialized,
-        },
-        isGroup: true,
-        name: chat.name || "",
-      }));
-
-    if (groups.length > 0) {
-      return groups;
-    }
-  } catch (error) {
-    logger.warn(
-      { error: error.message, stack: error.stack },
-      "client.getChats() group listing failed"
-    );
-  }
-
-  if (!client.pupPage) {
-    return [];
-  }
-
-  return client.pupPage.evaluate(() => {
-    const store = window.Store || {};
-    const chatCollection = store.Chat;
-    const rawChats = chatCollection && typeof chatCollection.getModelsArray === "function"
-      ? chatCollection.getModelsArray()
-      : [];
-
-    return rawChats
-      .filter((chat) => {
-        const id = chat && chat.id;
-        const serialized = id && (id._serialized || `${id.user || ""}@${id.server || ""}`);
-        return serialized && serialized.endsWith("@g.us");
-      })
-      .map((chat) => {
-        const id = chat.id || {};
-        return {
-          id: {
-            _serialized: id._serialized || `${id.user || ""}@${id.server || ""}`,
-          },
-          isGroup: true,
-          name: chat.name || chat.formattedTitle || chat.contact?.name || "",
-        };
-      })
-      .filter((chat) => chat.id && chat.id._serialized);
-  });
+  return readGroupDirectory(client, logger);
 }
 
 async function listGroups() {
