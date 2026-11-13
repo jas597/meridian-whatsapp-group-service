@@ -1110,9 +1110,29 @@ async function sendContactMessage({ contact, message, imageBase64, imageFilename
   const createdWatcher = watchOutgoingMessageCreate(contactId, message, createTimeoutMs);
   let sentMessage;
   try {
-    sentMessage = media
-      ? await readyClient.sendMessage(contactId, media, { caption: message })
-      : await readyClient.sendMessage(contactId, message);
+    if (media) {
+      // whatsapp-web.js can fail in Client.sendMessage() for media when
+      // WhatsApp Web exposes the recipient as a LID. Jawa already has an
+      // existing chat in this paired 6470 session, so prefer that concrete
+      // Chat model: it already carries the internal id object WhatsApp's
+      // media pipeline expects.
+      let existingChat = null;
+      try {
+        const chats = await readyClient.getChats();
+        existingChat = (chats || []).find((chat) => {
+          const serialized = chat && chat.id && chat.id._serialized ? String(chat.id._serialized) : "";
+          return serialized === contactId
+            || normalizeMessageContact(serialized) === normalizeMessageContact(contactId);
+        }) || null;
+      } catch (chatError) {
+        logger.warn({ contact, contactId, error: chatError.message }, "Unable to resolve existing chat for media send");
+      }
+      sentMessage = existingChat && typeof existingChat.sendMessage === "function"
+        ? await existingChat.sendMessage(media, { caption: message })
+        : await readyClient.sendMessage(contactId, media, { caption: message });
+    } else {
+      sentMessage = await readyClient.sendMessage(contactId, message);
+    }
   } catch (error) {
     createdWatcher.cancel();
     throw error;
