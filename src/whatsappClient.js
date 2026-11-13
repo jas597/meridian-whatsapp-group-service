@@ -820,7 +820,9 @@ function buildImageMedia(imageBase64, imageFilename = "staff-schedule.png") {
     return null;
   }
   const cleanData = data.includes(",") ? data.split(",").pop() : data;
-  return new MessageMedia("image/png", cleanData, imageFilename || "staff-schedule.png");
+  const filename = imageFilename || "staff-schedule.png";
+  const mimeType = /\.jpe?g$/i.test(filename) ? "image/jpeg" : "image/png";
+  return new MessageMedia(mimeType, cleanData, filename);
 }
 
 async function sendGroupMessage({ group, message, imageBase64, imageFilename, singleAttempt=false, resolvedGroupId }) {
@@ -1080,7 +1082,18 @@ function waitForMessageAck(rawId, timeoutMs) {
 async function sendContactMessage({ contact, message, imageBase64, imageFilename }) {
   const readyClient = requireReadyClient();
 
-  const contactIds = await resolveContactIds(contact);
+  const media = buildImageMedia(imageBase64, imageFilename);
+  let contactIds;
+  if (media) {
+    const normalized = normalizeContactTarget(contact);
+    if (normalized && !normalized.endsWith("@c.us") && !normalized.endsWith("@g.us") && !normalized.endsWith("@lid")) {
+      contactIds = [`${normalized}@c.us`];
+    } else {
+      contactIds = normalized ? [normalized] : [];
+    }
+  } else {
+    contactIds = await resolveContactIds(contact);
+  }
   if (!contactIds.length) {
     const error = new Error("WhatsApp contact not found.");
     error.statusCode = 404;
@@ -1100,7 +1113,6 @@ async function sendContactMessage({ contact, message, imageBase64, imageFilename
   // reliable evidence of delivery either. message_ack is WhatsApp's own
   // delivery signal; only that (ACK_SERVER or higher) counts as real
   // confirmation.
-  const media = buildImageMedia(imageBase64, imageFilename);
   const createTimeoutMs = Number(process.env.WHATSAPP_MESSAGE_CREATE_TIMEOUT_MS || 12000);
 
   // Register before sendMessage(): current whatsapp-web.js can successfully
