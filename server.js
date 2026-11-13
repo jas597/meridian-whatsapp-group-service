@@ -67,6 +67,12 @@ async function start() {
       logger[result.authenticated ? "info" : "warn"](result, "Floor-plan Gmail connection check");
     });
 
+    logger.info({
+      tokenConfigured: Boolean(process.env.WHATSAPP_CLOUD_API_TOKEN),
+      phoneNumberIdConfigured: Boolean(process.env.WHATSAPP_CLOUD_API_PHONE_NUMBER_ID),
+      kimPhoneNumberIdConfigured: Boolean(process.env.WHATSAPP_CLOUD_API_KIM_PHONE_NUMBER_ID),
+    }, "WHATSAPP_CLOUD_API_CONFIG");
+
     logger.info("Initializing WhatsApp client");
     // initializeWithRetry() never throws - a failed attempt schedules its
     // own backoff retry internally instead of leaving the service stuck
