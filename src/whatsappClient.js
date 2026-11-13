@@ -1123,38 +1123,14 @@ async function sendContactMessage({ contact, message, imageBase64, imageFilename
   let sentMessage;
   try {
     if (media) {
-      // whatsapp-web.js can fail in Client.sendMessage() for media when
-      // WhatsApp Web exposes the recipient as a LID. Jawa already has an
-      // existing chat in this paired 6470 session, so prefer that concrete
-      // Chat model: it already carries the internal id object WhatsApp's
-      // media pipeline expects.
-      let existingChat = null;
-      try {
-        const contactModel = await readyClient.getContactById(contactId);
-        if (contactModel && typeof contactModel.getChat === "function") {
-          existingChat = await contactModel.getChat();
-        }
-      } catch (contactError) {
-        logger.warn({ contact, contactId, error: contactError.message }, "Unable to resolve contact chat for media send");
-      }
-      if (!existingChat) {
-        try {
-          const chats = await readyClient.getChats();
-          existingChat = (chats || []).find((chat) => {
-            const serialized = chat && chat.id && chat.id._serialized ? String(chat.id._serialized) : "";
-            return serialized === contactId
-              || normalizeMessageContact(serialized) === normalizeMessageContact(contactId);
-          }) || null;
-        } catch (chatError) {
-          logger.warn({ contact, contactId, error: chatError.message }, "Unable to resolve existing chat for media send");
-        }
-      }
-      if (!existingChat || typeof existingChat.sendMessage !== "function") {
-        const error = new Error("Existing WhatsApp chat could not be resolved for media send.");
-        error.statusCode = 502;
-        throw error;
-      }
-      sentMessage = await existingChat.sendMessage(media, { caption: message });
+      // Direct image sends are currently broken by WhatsApp Web's LID media
+      // getter for Jawa's chat. Sending the same JPEG as a document uses a
+      // separate upload path and avoids that getter while preserving the
+      // actual layout file.
+      sentMessage = await readyClient.sendMessage(contactId, media, {
+        caption: message,
+        sendMediaAsDocument: true,
+      });
     } else {
       sentMessage = await readyClient.sendMessage(contactId, message);
     }
