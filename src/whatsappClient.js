@@ -1123,13 +1123,12 @@ async function sendContactMessage({ contact, message, imageBase64, imageFilename
   let sentMessage;
   try {
     if (media) {
-      // Direct image sends are currently broken by WhatsApp Web's LID media
-      // getter for Jawa's chat. Sending the same JPEG as a document uses a
-      // separate upload path and avoids that getter while preserving the
-      // actual layout file.
+      // Group reports render as inline images. Keep the existing document
+      // upload path for individual chats, which avoids their LID media bug.
+      // Dispatch once only; never retry a media send as another format.
       sentMessage = await readyClient.sendMessage(contactId, media, {
         caption: message,
-        sendMediaAsDocument: true,
+        sendMediaAsDocument: !contactId.endsWith("@g.us"),
       });
     } else {
       sentMessage = await readyClient.sendMessage(contactId, message);
@@ -1240,3 +1239,4 @@ module.exports = {
     },
   },
 };
+
