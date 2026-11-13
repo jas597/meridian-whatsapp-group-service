@@ -55,8 +55,8 @@ function createLeavePlanningRouter({whatsappClient,env=process.env}){
    const fd=fs.openSync(dir,'r');try{fs.fsyncSync(fd);}finally{fs.closeSync(fd);}
   }catch(e){if(e.code==='EEXIST')return res.status(502).json(unknown.body);return blocked('Brief notification storage is unavailable.');}
   let outcome=unknown;
+  const sendTarget=contact.trim();
   try{
-   const sendTarget=contact.trim();
    const sent=await whatsappClient.sendContactMessage({contact:sendTarget,message,imageBase64:imageBase64||'',imageFilename:imageFilename||'meridian-daily-brief.jpg'});
    if(sent.messageId)outcome={statusCode:200,body:{success:true,messageId:sent.messageId,sentAt:sent.sentAt}};
   }catch(error){logger.error({error:error?.message,stack:error?.stack,contact:sendTarget},'Leave-planning direct contact send failed');/* Any exception after dispatch may have sent. Never auto-repeat as a new message. */}
